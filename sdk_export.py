@@ -10,6 +10,7 @@ def tree_replace(upstream: pathlib.Path, output: pathlib.Path, path):
 
 def export(upstream: pathlib.Path, output: pathlib.Path):
     tree_replace(upstream, output, ['drivers', 'entropy'])
+    tree_replace(upstream, output, ['ext', 'oberon'])
     tree_replace(upstream, output, ['modules', 'nrfxlib'])
 
 if __name__ == '__main__':
