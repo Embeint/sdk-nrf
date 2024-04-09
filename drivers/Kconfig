@@ -7,5 +7,6 @@
 menu "Device Drivers"
 
 rsource "entropy/Kconfig"
+rsource "wifi/Kconfig"
 
 endmenu

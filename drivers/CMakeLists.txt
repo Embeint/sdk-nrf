@@ -5,3 +5,5 @@
 #
 
 add_subdirectory(entropy)
+
+add_subdirectory_ifdef(CONFIG_WIFI wifi)
