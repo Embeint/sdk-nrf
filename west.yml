@@ -10,9 +10,9 @@ manifest:
       remote: ncs
       repo-path: sdk-nrfxlib
       path: modules/nrfconnect/nrfxlib
-      revision: v2.6.0
+      revision: v2.6.1
     - name: hostap
       remote: ncs
       repo-path: sdk-hostap
       path: modules/nrfconnect/hostap
-      revision: dda5457ad2cfce99e333980c7764c8d480ae4010
+      revision: e080aa8d0c7706ec5ab74785b3c8accc4973cd86

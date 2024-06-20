@@ -210,10 +210,6 @@ zephyr_library_compile_definitions_ifdef(CONFIG_WPA_SUPP_CRYPTO_WEP
 	CONFIG_WEP
 )
 
-if(NOT CONFIG_WPA_SUPP_CRYPTO_NONE)
-	zephyr_library_link_libraries(mbedTLS)
-endif()
-
 zephyr_library_sources_ifndef(CONFIG_WPA_SUPP_CRYPTO_NONE
 	${COMMON_SRC_BASE}/common/wpa_common.c
 	${COMMON_SRC_BASE}/rsn_supp/wpa.c
@@ -385,5 +381,9 @@ zephyr_library_sources_ifdef(CONFIG_WPA_SUPP_EAPOL
 
 zephyr_library_compile_definitions_ifdef(CONFIG_WPA_SUPP_EAPOL
 	IEEE8021X_EAPOL
+)
+
+zephyr_library_compile_definitions_ifdef(WPA_SUPP_NW_SEL_RELIABILITY
+	CONFIG_NW_SEL_RELIABILITY
 )
 endif()
