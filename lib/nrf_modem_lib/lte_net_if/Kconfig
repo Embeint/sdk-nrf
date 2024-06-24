@@ -72,6 +72,9 @@ config NRF_MODEM_LIB_NET_IF_DOWN_DEFAULT_LTE_DISCONNECT
 	 If this option is set, the LTE iface will disconnect LTE instead of shutting down the
 	 modem when being brought down.
 
+config NRF_MODEM_LIB_NET_IF_APPLICATION_ERROR_HANDLER
+	bool "Extend nrf_modem_fault_handler to call an application defined function"
+
 module = NRF_MODEM_LIB_NET_IF
 module-str = Modem network interface
 source "subsys/logging/Kconfig.template.log_config"
