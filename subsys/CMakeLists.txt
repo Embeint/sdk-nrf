@@ -4,4 +4,5 @@
 # SPDX-License-Identifier: LicenseRef-Nordic-5-Clause
 #
 
+add_subdirectory(bluetooth)
 add_subdirectory(mpsl)

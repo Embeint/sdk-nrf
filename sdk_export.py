@@ -17,15 +17,20 @@ def file_replace(upstream: pathlib.Path, output: pathlib.Path, path):
 
 
 def export(upstream: pathlib.Path, output: pathlib.Path):
+    tree_replace(upstream, output, ["drivers", "bluetooth"])
     tree_replace(upstream, output, ["drivers", "entropy"])
+    tree_replace(upstream, output, ["drivers", "mpsl"])
     tree_replace(upstream, output, ["drivers", "wifi"])
     tree_replace(upstream, output, ["dts", "bindings", "wifi"])
     tree_replace(upstream, output, ["ext", "oberon"])
+    tree_replace(upstream, output, ["include", "bluetooth"])
     tree_replace(upstream, output, ["include", "modem"])
+    tree_replace(upstream, output, ["include", "mpsl"])
     tree_replace(upstream, output, ["lib", "at_cmd_parser"])
     tree_replace(upstream, output, ["lib", "at_host"])
     tree_replace(upstream, output, ["lib", "at_monitor"])
     tree_replace(upstream, output, ["lib", "lte_link_control"])
+    tree_replace(upstream, output, ["lib", "multithreading_lock"])
     tree_replace(upstream, output, ["lib", "nrf_modem_lib"])
     tree_replace(upstream, output, ["lib", "pdn"])
     tree_replace(upstream, output, ["modules", "nrfxlib"])

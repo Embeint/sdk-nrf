@@ -6,8 +6,13 @@
 
 menu "Device Drivers"
 
+rsource "bluetooth/Kconfig"
 rsource "entropy/Kconfig"
 rsource "hw_cc3xx/Kconfig"
 rsource "wifi/Kconfig"
+
+if MPSL && !MPSL_FEM_ONLY
+rsource "mpsl/Kconfig"
+endif
 
 endmenu
