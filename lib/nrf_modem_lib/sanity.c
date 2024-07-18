@@ -12,9 +12,9 @@
 
 #if defined(CONFIG_NET_SOCKETS_OFFLOAD)
 #include <zephyr/net/socket.h>
-#include <zephyr/net/socket_ncs.h>
 #include <nrf_socket.h>
 #include <nrf_gai_errors.h>
+#include <zephyr/net/socket_ncs.h>
 #endif
 
 #if defined(CONFIG_POSIX_API)

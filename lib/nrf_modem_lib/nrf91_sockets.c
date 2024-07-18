@@ -16,6 +16,7 @@
 #include <fcntl.h>
 #include <zephyr/init.h>
 #include <zephyr/net/socket_offload.h>
+#include <zephyr/net/socket_ncs.h>
 #include <zephyr/net/offloaded_netdev.h>
 #include <zephyr/net/net_ip.h>
 #include <nrf_socket.h>
@@ -29,7 +30,6 @@
 #include <zephyr/net/conn_mgr_connectivity_impl.h>
 #include <zephyr/net/net_if.h>
 #include <zephyr/sys/util_macro.h>
-#include <zephyr/net/socket_ncs.h>
 
 #if defined(CONFIG_POSIX_API)
 #include <zephyr/posix/poll.h>
@@ -356,7 +356,7 @@ static int nrf91_socket_offload_socket(int family, int type, int proto)
 static int nrf91_socket_offload_accept(void *obj, struct sockaddr *addr,
 				       socklen_t *addrlen)
 {
-	int fd = z_reserve_fd();
+	int fd = zvfs_reserve_fd();
 	int sd = OBJ_TO_SD(obj);
 	int new_sd = -1;
 	struct nrf_sock_ctx *ctx = NULL;
@@ -366,7 +366,7 @@ static int nrf91_socket_offload_accept(void *obj, struct sockaddr *addr,
 	struct nrf_sockaddr_in6 nrf_addr;
 	nrf_socklen_t nrf_addrlen;
 
-	/* `z_reserve_fd()` can fail */
+	/* `zvfs_reserve_fd()` can fail */
 	if (fd < 0) {
 		return -1;
 	}
@@ -413,7 +413,7 @@ static int nrf91_socket_offload_accept(void *obj, struct sockaddr *addr,
 		}
 	}
 
-	z_finalize_fd(fd, ctx,
+	zvfs_finalize_fd(fd, ctx,
 		      (const struct fd_op_vtable *)&nrf91_socket_fd_op_vtable);
 
 	return fd;
@@ -427,7 +427,7 @@ error:
 		release_ctx(ctx);
 	}
 
-	z_free_fd(fd);
+	zvfs_free_fd(fd);
 	return -1;
 }
 
@@ -1101,14 +1101,14 @@ static int nrf91_socket_create(int family, int type, int proto)
 		return native_socket(family, type, proto, &tls_offload_disabled);
 	}
 
-	fd = z_reserve_fd();
+	fd = zvfs_reserve_fd();
 	if (fd < 0) {
 		return -1;
 	}
 
 	sd = nrf91_socket_offload_socket(family, type, proto);
 	if (sd < 0) {
-		z_free_fd(fd);
+		zvfs_free_fd(fd);
 		return -1;
 	}
 
@@ -1116,11 +1116,11 @@ static int nrf91_socket_create(int family, int type, int proto)
 	if (ctx == NULL) {
 		errno = ENOMEM;
 		nrf_close(sd);
-		z_free_fd(fd);
+		zvfs_free_fd(fd);
 		return -1;
 	}
 
-	z_finalize_fd(fd, ctx,
+	zvfs_finalize_fd(fd, ctx,
 		      (const struct fd_op_vtable *)&nrf91_socket_fd_op_vtable);
 
 	return fd;

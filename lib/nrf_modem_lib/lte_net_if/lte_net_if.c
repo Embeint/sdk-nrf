@@ -18,19 +18,6 @@
 
 LOG_MODULE_REGISTER(nrf_modem_lib_netif, CONFIG_NRF_MODEM_LIB_NET_IF_LOG_LEVEL);
 
-/* This library requires that Zephyr's IPv4 and IPv6 stacks are enabled.
- *
- * The modem supports both IPv6 and IPv4. At any time, either IP families can be given by
- * the network, independently of each other. Because of this we require that the corresponding
- * IP stacks are enabled in Zephyr NET in order to add and remove both IP family address types
- * to and from the network interface.
- */
-BUILD_ASSERT(IS_ENABLED(CONFIG_NET_IPV6) && IS_ENABLED(CONFIG_NET_IPV4), "IPv6 and IPv4 required");
-
-BUILD_ASSERT((CONFIG_NET_CONNECTION_MANAGER_MONITOR_STACK_SIZE >= 1024),
-	     "Stack size of the connection manager internal thread is too low. "
-	     "Increase CONFIG_NET_CONNECTION_MANAGER_MONITOR_STACK_SIZE to a minimum of 1024");
-
 /* Forward declarations */
 static void connection_timeout_work_fn(struct k_work *work);
 static void connection_timeout_schedule(void);
@@ -67,14 +54,14 @@ static void fatal_error_notify_and_disconnect(void)
 }
 
 /* Handler called on modem faults. */
-void nrf_modem_fault_handler(struct nrf_modem_fault_info *fault_info)
+void lte_net_if_modem_fault_handler(struct nrf_modem_fault_info *fault_info)
 {
-	LOG_ERR("Modem error: 0x%x, PC: 0x%x", fault_info->reason, fault_info->program_counter);
-	fatal_error_notify_and_disconnect();
+	net_mgmt_event_notify(NET_EVENT_CONN_IF_FATAL_ERROR, iface_bound);
+	net_if_dormant_on(iface_bound);
 #ifdef CONFIG_NRF_MODEM_LIB_NET_IF_APPLICATION_ERROR_HANDLER
-	void lte_net_if_modem_fault_handler(struct nrf_modem_fault_info * fault_info);
+	void lte_net_if_modem_fault_app_handler(struct nrf_modem_fault_info * fault_info);
 
-	lte_net_if_modem_fault_handler(fault_info);
+	lte_net_if_modem_fault_app_handler(fault_info);
 #endif
 }
 
@@ -210,6 +197,7 @@ static void connection_timeout_schedule(void)
 
 static void on_pdn_activated(void)
 {
+#if CONFIG_NET_IPV4
 	int ret;
 
 	ret = lte_ipv4_addr_add(iface_bound);
@@ -223,29 +211,38 @@ static void on_pdn_activated(void)
 	}
 
 	update_has_pdn(true);
+
+#endif /* CONFIG_NET_IPV4 */
+
+	/* IPv6 is updated on a aseparate event */
 }
 
 static void on_pdn_deactivated(void)
 {
 	int ret;
 
+#if CONFIG_NET_IPV4
 	ret = lte_ipv4_addr_remove(iface_bound);
 	if (ret) {
 		LOG_ERR("ipv4_addr_remove, error: %d", ret);
 		fatal_error_notify_and_disconnect();
 		return;
 	}
+#endif /* CONFIG_NET_IPV4 */
 
+#if CONFIG_NET_IPV6
 	ret = lte_ipv6_addr_remove(iface_bound);
 	if (ret) {
 		LOG_ERR("ipv6_addr_remove, error: %d", ret);
 		fatal_error_notify_and_disconnect();
 		return;
 	}
+#endif /* CONFIG_NET_IPV6 */
 
 	update_has_pdn(false);
 }
 
+#if CONFIG_NET_IPV6
 static void on_pdn_ipv6_up(void)
 {
 	int ret;
@@ -256,6 +253,8 @@ static void on_pdn_ipv6_up(void)
 		fatal_error_notify_and_disconnect();
 		return;
 	}
+
+	update_has_pdn(true);
 }
 
 static void on_pdn_ipv6_down(void)
@@ -269,6 +268,7 @@ static void on_pdn_ipv6_down(void)
 		return;
 	}
 }
+#endif /* CONFIG_NET_IPV6 */
 
 /* Event handlers */
 static void pdn_event_handler(uint8_t cid, enum pdn_event event, int reason)
@@ -291,6 +291,7 @@ static void pdn_event_handler(uint8_t cid, enum pdn_event event, int reason)
 		LOG_DBG("PDN connection deactivated");
 		on_pdn_deactivated();
 		break;
+#if CONFIG_NET_IPV6
 	case PDN_EVENT_IPV6_UP:
 		LOG_DBG("PDN IPv6 up");
 		on_pdn_ipv6_up();
@@ -299,6 +300,7 @@ static void pdn_event_handler(uint8_t cid, enum pdn_event event, int reason)
 		LOG_DBG("PDN IPv6 down");
 		on_pdn_ipv6_down();
 		break;
+#endif /* CONFIG_NET_IPV6 */
 	default:
 		LOG_ERR("Unexpected PDN event: %d", event);
 		break;
