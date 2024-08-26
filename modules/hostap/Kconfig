@@ -8,8 +8,8 @@
 menuconfig WPA_SUPP
 	bool "WPA supplicant support"
 	# Need full POSIX from libc, Zephyr's POSIX support is only partial
-	select POSIX_TIMERS
-	select POSIX_SIGNALS
+	select POSIX_CLOCK
+	select POSIX_SIGNAL
 	select POSIX_API
 	select NET_SOCKETS
 	select NET_SOCKETS_PACKET

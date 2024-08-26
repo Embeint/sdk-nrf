@@ -6,7 +6,7 @@
 
 menu "Libraries"
 
-rsource "at_cmd_parser/Kconfig"
+rsource "at_parser/Kconfig"
 rsource "at_host/Kconfig"
 rsource "at_monitor/Kconfig"
 rsource "lte_link_control/Kconfig"
