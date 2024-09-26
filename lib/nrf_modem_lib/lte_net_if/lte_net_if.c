@@ -54,10 +54,15 @@ static void fatal_error_notify_and_disconnect(void)
 }
 
 /* Handler called on modem faults. */
-void lte_net_if_modem_fault_handler(void)
+void lte_net_if_modem_fault_handler(struct nrf_modem_fault_info *fault_info)
 {
 	net_mgmt_event_notify(NET_EVENT_CONN_IF_FATAL_ERROR, iface_bound);
 	net_if_dormant_on(iface_bound);
+#ifdef CONFIG_NRF_MODEM_LIB_NET_IF_APPLICATION_ERROR_HANDLER
+	void lte_net_if_modem_fault_app_handler(struct nrf_modem_fault_info* fault_info);
+
+	lte_net_if_modem_fault_app_handler(fault_info);
+#endif
 }
 
 /* Called when we detect LTE connectivity has been gained.
