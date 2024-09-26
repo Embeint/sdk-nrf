@@ -27,6 +27,9 @@ extern "C" {
  * @brief Public APIs for the AT monitor library.
  */
 
+/** AT dispatch handling fault */
+#define NRF_MODEM_FAULT_AT_DISPATCH 0x080
+
 /**
  * @brief AT monitor callback.
  *
