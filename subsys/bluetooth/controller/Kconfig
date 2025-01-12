@@ -12,6 +12,8 @@ config BT_LL_SOFTDEVICE
 	bool "SoftDevice Link Layer"
 	select MPSL
 	select ZERO_LATENCY_IRQS if !SOC_SERIES_BSIM_NRFXX
+	select BT_CTLR_CRYPTO_SUPPORT
+	select BT_CTLR_ENTROPY_SUPPORT
 	select BT_CTLR_LE_ENC_SUPPORT
 	select BT_CTLR_ECDH_SUPPORT
 	select BT_CTLR_EXT_REJ_IND_SUPPORT
@@ -35,15 +37,17 @@ config BT_LL_SOFTDEVICE
 	select BT_CTLR_ADV_ISO_SUPPORT
 	select BT_CTLR_PHY_2M_SUPPORT if HAS_HW_NRF_RADIO_BLE_2M
 	select BT_CTLR_PHY_CODED_SUPPORT if HAS_HW_NRF_RADIO_BLE_CODED
+	select BT_CTLR_CHANNEL_SOUNDING_SUPPORT if HAS_HW_NRF_RADIO_CS
 	select BT_HAS_HCI_VS
 	select BT_CTLR_DF_SUPPORT if HAS_HW_NRF_RADIO_DFE
 	select BT_CTLR_LE_POWER_CONTROL_SUPPORT
 	select BT_CTLR_LE_PATH_LOSS_MONITORING_SUPPORT
 	select BT_CTLR_SUBRATING_SUPPORT
 	select BT_LL_SOFTDEVICE_HEADERS_INCLUDE
-	select BT_CTLR_CRYPTO_SUPPORT
-	depends on (SOC_SERIES_NRF52X || SOC_COMPATIBLE_NRF5340_CPUNET ||\
+	select SOC_NRF54H20_NO_MRAM_LATENCY if SOC_NRF54H20_CPURAD
+	depends on (SOC_SERIES_BSIM_NRFXX || SOC_SERIES_NRF52X || SOC_COMPATIBLE_NRF5340_CPUNET ||\
 			    SOC_NRF54H20_CPURAD || SOC_SERIES_NRF54LX)
+	depends on DT_HAS_NORDIC_BT_HCI_SDC_ENABLED
 	help
 	  Use SoftDevice Link Layer implementation.
 
@@ -125,10 +129,12 @@ config BT_CTLR_SDC_QOS_CHANNEL_SURVEY
 
 config BT_CTLR_SDC_ALLOW_PARALLEL_SCANNING_AND_INITIATING
 	bool "Allow scanning and initiating at the same time"
-	select EXPERIMENTAL
 	depends on BT_CENTRAL
+	default BT_SCAN_AND_INITIATE_IN_PARALLEL
 	help
-	  Enables support for scanning and initiating at the same time
+	  Enables support for scanning and initiating at the same time.
+	  This feature can be used to reduce the time needed to connect
+	  to many devices.
 
 config BT_CTLR_SDC_PERIPHERAL_COUNT
 	int "Number of concurrent peripheral roles"
@@ -392,9 +398,7 @@ config BT_CTLR_SDC_EVENT_TRIGGER
 	  Enable support for the Event Trigger feature.
 	  The event trigger is a proprietary SDC feature which can be used
 	  to perform tasks in synchronization with radio activity.
-	  When enabled, this feature will trigger a (D)PPI task at the start of radio events.
-	  When used for connections, the connection event trigger can be configured to trigger
-	  every N connection events starting from a given connection event counter.
+	  When enabled, this feature will trigger a peripheral task at the start of radio events.
 
 config BT_CTLR_SDC_CONN_ANCHOR_POINT_REPORT
 	bool "Connection event anchor point reports"
@@ -569,6 +573,41 @@ config BT_CTLR_SDC_CIS_SUBEVENT_LENGTH_US
 	  HCI command used to configure the CIG will fail.
 	  If this parameter is set to zero, the subevent length
 	  is chosen by the controller.
+
+config BT_CTLR_CHANNEL_SOUNDING
+	bool "Channel Sounding support [EXPERIMENTAL]"
+	select EXPERIMENTAL
+
+config BT_CTLR_SDC_CS_COUNT
+	int "Number of concurrent connections supporting CS procedure [EXPERIMENTAL]"
+	default 1
+	depends on BT_CTLR_CHANNEL_SOUNDING
+	help
+	  Set the number of concurrent connections that can support Channel Sounding procedure.
+
+config BT_CTLR_SDC_CS_MAX_ANTENNA_PATHS
+	int "Max number of Channel Sounding antenna paths supported by the controller [EXPERIMENTAL]"
+	default 1
+	range 1 4
+	depends on BT_CTLR_CHANNEL_SOUNDING
+
+config BT_CTLR_SDC_CS_NUM_ANTENNAS
+	int "Number of antennas used in Channel Sounding procedure supported by the controller [EXPERIMENTAL]"
+	default 1
+	range 1 BT_CTLR_SDC_CS_MAX_ANTENNA_PATHS
+	depends on BT_CTLR_CHANNEL_SOUNDING
+
+config BT_CTLR_SDC_CS_STEP_MODE3
+	bool "Enable optional step mode-3 capability [EXPERIMENTAL]"
+	depends on BT_CTLR_CHANNEL_SOUNDING
+
+config BT_CTLR_SDC_LE_POWER_CLASS_1
+	bool "Device supports transmitting at LE Power Class 1 level"
+	default y if BT_CTLR_TX_PWR_ANTENNA >= 10
+	help
+	  This should be set if the device supports transmitting above +10dBm.
+	  See Bluetooth Core Specification, Vol 6, Part A, Section 3
+	  Transmitter Characteristics for more information.
 
 endmenu
 endif  # BT_LL_SOFTDEVICE

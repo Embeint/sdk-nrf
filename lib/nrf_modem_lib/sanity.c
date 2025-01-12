@@ -6,7 +6,9 @@
 
 #include <zephyr/toolchain.h>
 #include <zephyr/sys/util.h>
+#ifdef CONFIG_SOC_SERIES_NRF91X
 #include <pm_config.h>
+#endif /* CONFIG_SOC_SERIES_NRF91X */
 #include <errno.h>
 #include <nrf_errno.h>
 
@@ -111,6 +113,7 @@ BUILD_ASSERT(ETOOMANYREFS    == NRF_ETOOMANYREFS,    "Errno not aligned with nrf
 
 /* Shared memory sanity check */
 
+#ifdef CONFIG_SOC_SERIES_NRF91X
 #define SRAM_BASE 0x20000000
 #define SHMEM_RANGE KB(128)
 #define SHMEM_END (SRAM_BASE + SHMEM_RANGE)
@@ -132,6 +135,7 @@ BUILD_ASSERT(PM_NRF_MODEM_LIB_RX_ADDRESS % 4 == 0,
 BUILD_ASSERT(PM_NRF_MODEM_LIB_TRACE_ADDRESS % 4 == 0,
 	"libmodem Trace region base address must be word aligned");
 #endif
+#endif /* CONFIG_SOC_SERIES_NRF91X */
 
 /* Socket values sanity check */
 

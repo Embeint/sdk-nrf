@@ -36,19 +36,24 @@ static struct fcb trace_fcb = {
 	.f_flags = FCB_FLAGS_CRC_DISABLED,
 };
 
+/* Flash backend needs to wait for a sector to be cleared and will give the semaphore instead.
+ * This should be cleaned up with a separate API, but we declare the semaphore as extern for now.
+ */
+extern struct k_sem trace_clear_sem;
+
 /* Store in __noinit RAM to perserve in warm boot. */
 static __noinit uint32_t magic;
 static __noinit size_t read_offset;
 static __noinit struct fcb_entry loc;
 static __noinit struct flash_sector *sector;
 
-static size_t trace_bytes_unread;
-static size_t flash_buf_written;
-static uint8_t flash_buf[BUF_SIZE];
+static __noinit size_t trace_bytes_unread;
+static __noinit size_t flash_buf_written;
+static __noinit uint8_t flash_buf[BUF_SIZE];
 
 static bool is_initialized;
 
-static int trace_backend_clear(void);
+static struct k_sem fcb_sem;
 
 static size_t buffer_append(const void *data, size_t len)
 {
@@ -87,6 +92,8 @@ static int buffer_flush_to_flash(void)
 		return -ENODATA;
 	}
 
+	k_sem_take(&fcb_sem, K_FOREVER);
+
 	err = fcb_append(&trace_fcb, flash_buf_written, &loc_flush);
 	if (err) {
 		if (IS_ENABLED(CONFIG_NRF_MODEM_TRACE_FLASH_NOSPACE_ERASE_OLDEST)) {
@@ -101,21 +108,24 @@ static int buffer_flush_to_flash(void)
 			err = fcb_walk(&trace_fcb, loc_flush.fe_sector, fcb_walk_callback, NULL);
 			if (err) {
 				LOG_ERR("fcb_walk failed, err %d", err);
-				return err;
+				goto out;
 			}
 
 			/* Erase the oldest sector and append again. */
 			err = fcb_rotate(&trace_fcb);
 			if (err) {
 				LOG_ERR("fcb_rotate failed, err %d", err);
-				return err;
+				goto out;
 			}
 			err = fcb_append(&trace_fcb, flash_buf_written, &loc_flush);
 		}
 
 		if (err) {
-			LOG_ERR("fcb_append failed, err %d", err);
-			return -ENOSPC;
+			if (err != -ENOSPC) {
+				LOG_ERR("fcb_append failed, err %d", err);
+			}
+
+			goto out;
 		}
 	}
 
@@ -123,18 +133,20 @@ static int buffer_flush_to_flash(void)
 		trace_fcb.fap, FCB_ENTRY_FA_DATA_OFF(loc_flush), flash_buf, flash_buf_written);
 	if (err) {
 		LOG_ERR("flash_area_write failed, err %d", err);
-		return err;
+		goto out;
 	}
 
 	err = fcb_append_finish(&trace_fcb, &loc_flush);
 	if (err) {
 		LOG_ERR("fcb_append_finish failed, err %d", err);
-		return err;
+		goto out;
 	}
 
 	flash_buf_written = 0;
 
-	return 0;
+out:
+	k_sem_give(&fcb_sem);
+	return err;
 }
 
 static int trace_flash_erase(void)
@@ -160,6 +172,8 @@ int trace_backend_init(trace_backend_processed_cb trace_processed_cb)
 		return -EFAULT;
 	}
 
+	k_sem_init(&fcb_sem, 0, 1);
+
 	trace_processed_callback = trace_processed_cb;
 
 	err = flash_area_open(FIXED_PARTITION_ID(MODEM_TRACE), &modem_trace_area);
@@ -182,12 +196,16 @@ int trace_backend_init(trace_backend_processed_cb trace_processed_cb)
 
 	/* After a cold boot the magic will contain random values. */
 	if (magic != TRACE_MAGIC_INITIALIZED) {
-		LOG_DBG("Initializing");
+		LOG_DBG("Trace magic not found, initializing");
 		read_offset = 0;
+		trace_bytes_unread = 0;
+		flash_buf_written = 0;
 		memset(&loc, 0, sizeof(loc));
 		sector = NULL;
 		magic = TRACE_MAGIC_INITIALIZED;
 		trace_flash_erase();
+	} else {
+		LOG_DBG("Trace magic found, skipping initialization");
 	}
 
 	uint32_t f_sector_cnt = sizeof(trace_flash_sectors) / sizeof(struct flash_sector);
@@ -215,20 +233,11 @@ int trace_backend_init(trace_backend_processed_cb trace_processed_cb)
 		return err;
 	}
 
-	/* Get trace size */
-	err = fcb_getnext(&trace_fcb, &loc);
-	while (!err) {
-		trace_bytes_unread += loc.fe_data_len;
-		err = fcb_getnext(&trace_fcb, &loc);
-	}
-
-	loc.fe_sector = 0;
-	loc.fe_elem_off = 0;
-
 	is_initialized = true;
 
 	LOG_DBG("Modem trace flash storage initialized\n");
 
+	k_sem_give(&fcb_sem);
 	return 0;
 }
 
@@ -237,6 +246,9 @@ size_t trace_backend_data_size(void)
 	return trace_bytes_unread;
 }
 
+/* Read from offset
+ * FCB sem has to be taken before calling this function!
+ */
 static int read_from_offset(void *buf, size_t len)
 {
 	int err;
@@ -257,23 +269,14 @@ static int read_from_offset(void *buf, size_t len)
 		read_offset = 0;
 	}
 
-	/* Erase if done with previous sector. */
-	if (sector && (sector != loc.fe_sector)) {
-		err = fcb_rotate(&trace_fcb);
-		if (err) {
-			return to_read;
-		}
-	}
-
-	sector = loc.fe_sector;
-
 	return to_read;
 }
 
 int trace_backend_read(void *buf, size_t len)
 {
 	int err;
-	size_t to_read;
+	size_t ret;
+	size_t to_read = 0;
 
 	if (!is_initialized) {
 		return -EPERM;
@@ -283,8 +286,11 @@ int trace_backend_read(void *buf, size_t len)
 		return -EINVAL;
 	}
 
-	if (read_offset != 0) {
-		return read_from_offset(buf, len);
+	k_sem_take(&fcb_sem, K_FOREVER);
+
+	if (read_offset != 0 && loc.fe_sector) {
+		err = read_from_offset(buf, len);
+		goto out;
 	}
 
 	err = fcb_getnext(&trace_fcb, &loc);
@@ -292,8 +298,10 @@ int trace_backend_read(void *buf, size_t len)
 		/* Nothing to read */
 		loc.fe_sector = 0;
 		loc.fe_elem_off = 0;
+		read_offset = 0;
 		sector = NULL;
-		return -ENODATA;
+		err = -ENODATA;
+		goto out;
 	} else if (err == -ENOTSUP && flash_buf_written) {
 		to_read = MIN(flash_buf_written, len);
 		memcpy(buf, flash_buf, to_read);
@@ -306,27 +314,42 @@ int trace_backend_read(void *buf, size_t len)
 		flash_buf_written -= to_read;
 		trace_bytes_unread -= to_read;
 
-		if (sector) {
-			err = fcb_rotate(&trace_fcb);
-			if (err) {
-				return to_read;
-			}
-			sector = NULL;
-		}
-
-		return to_read;
+		err = to_read;
+		goto out;
 
 	} else if (err) {
-		return err;
+		goto out;
 	}
 
-	return read_from_offset(buf, len);
+	err = read_from_offset(buf, len);
+
+out:
+	ret = err;
+
+	/* Erase if done with previous sector. */
+	if (sector && (sector != loc.fe_sector)) {
+		err = fcb_rotate(&trace_fcb);
+		if (err) {
+			LOG_ERR("Failed to erase read sector, err %d", err);
+			k_sem_give(&fcb_sem);
+			/* Return what we have read */
+			return ret;
+		}
+
+		k_sem_give(&trace_clear_sem);
+	}
+
+	sector = loc.fe_sector;
+
+	k_sem_give(&fcb_sem);
+	return ret;
 }
 
 static int stream_write(const void *buf, size_t len)
 {
 	int ret;
 	int written;
+	size_t written_total = 0;
 	size_t bytes_left = len;
 	const uint8_t *bytes = buf;
 
@@ -336,10 +359,20 @@ static int stream_write(const void *buf, size_t len)
 
 	while (bytes_left) {
 		written = buffer_append(&bytes[len - bytes_left], bytes_left);
-		if (written != bytes_left) {
+		written_total += written;
+
+		if (flash_buf_written >= sizeof(flash_buf)) {
 			ret = buffer_flush_to_flash();
 			if (ret) {
 				LOG_ERR("buffer_flush_to_flash error %d", ret);
+				if (written_total) {
+					ret = trace_processed_callback(written);
+					if (ret < 0) {
+						LOG_ERR("trace_processed_callback failed: %d", ret);
+						return ret;
+					}
+					return written_total;
+				}
 				return ret;
 			}
 		}
@@ -347,13 +380,13 @@ static int stream_write(const void *buf, size_t len)
 			bytes_left -= written;
 			ret = trace_processed_callback(written);
 			if (ret < 0) {
-				LOG_ERR("trace_processed_callback failed: %d", ret);
+				LOG_ERR("trace_processed_callback 2 failed: %d", ret);
 				return ret;
 			}
 		}
 	}
 
-	return 0;
+	return written_total;
 }
 
 int trace_backend_write(const void *data, size_t len)
@@ -361,11 +394,12 @@ int trace_backend_write(const void *data, size_t len)
 	int write_ret = stream_write(data, len);
 
 	if (write_ret < 0) {
-		LOG_ERR("write failed: %d", write_ret);
-		return write_ret;
+		if (write_ret != -ENOSPC) {
+			LOG_ERR("write failed: %d", write_ret);
+		}
 	}
 
-	return (int)len;
+	return write_ret;
 }
 
 int trace_backend_clear(void)
@@ -376,6 +410,7 @@ int trace_backend_clear(void)
 		return -EPERM;
 	}
 
+	k_sem_take(&fcb_sem, K_FOREVER);
 	LOG_DBG("Clearing trace storage");
 	flash_buf_written = 0;
 	err = fcb_clear(&trace_fcb);
@@ -385,6 +420,8 @@ int trace_backend_clear(void)
 	trace_bytes_unread = 0;
 	read_offset = 0;
 	sector = NULL;
+
+	k_sem_give(&fcb_sem);
 
 	return err;
 }

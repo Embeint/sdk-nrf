@@ -242,6 +242,9 @@ static int z_to_nrf_optname(int z_in_level, int z_in_optname,
 		case SO_IPV6_ECHO_REPLY:
 			*nrf_out_optname = NRF_SO_IPV6_ECHO_REPLY;
 			break;
+		case SO_IPV6_DELAYED_ADDR_REFRESH:
+			*nrf_out_optname = NRF_SO_IPV6_DELAYED_ADDR_REFRESH;
+			break;
 		default:
 			retval = -1;
 			break;
@@ -761,7 +764,6 @@ static int nrf9x_socket_offload_getaddrinfo(const char *node,
 	struct nrf_addrinfo nrf_hints;
 	struct nrf_addrinfo *nrf_res = NULL;
 	struct nrf_addrinfo *nrf_hints_ptr = NULL;
-	static K_MUTEX_DEFINE(getaddrinfo_lock);
 
 	memset(&nrf_hints, 0, sizeof(struct nrf_addrinfo));
 
@@ -770,11 +772,10 @@ static int nrf9x_socket_offload_getaddrinfo(const char *node,
 		nrf_hints_ptr = &nrf_hints;
 	}
 
-	k_mutex_lock(&getaddrinfo_lock, K_FOREVER);
 	int retval = nrf_getaddrinfo(node, service, nrf_hints_ptr, &nrf_res);
 
 	if (retval != 0) {
-		goto error;
+		return retval;
 	}
 
 	struct nrf_addrinfo *next_nrf_res = nrf_res;
@@ -818,8 +819,6 @@ static int nrf9x_socket_offload_getaddrinfo(const char *node,
 	}
 	nrf_freeaddrinfo(nrf_res);
 
-error:
-	k_mutex_unlock(&getaddrinfo_lock);
 	return retval;
 }
 
@@ -1104,7 +1103,7 @@ static int nrf9x_socket_create(int family, int type, int proto)
 	}
 
 	zvfs_finalize_fd(fd, ctx,
-			 (const struct fd_op_vtable *)&nrf9x_socket_fd_op_vtable);
+		      (const struct fd_op_vtable *)&nrf9x_socket_fd_op_vtable);
 
 	return fd;
 }
@@ -1170,7 +1169,7 @@ static struct offloaded_if_api nrf9x_iface_offload_api = {
 	.enable = nrf9x_iface_enable,
 };
 
-/* Actual MTU for the nRF9x LTE link is handled by `lte_net_if.c` */
+/* TODO Get the actual MTU for the nRF9x LTE link. */
 NET_DEVICE_OFFLOAD_INIT(nrf9x_socket, "nrf9x_socket",
 			nrf9x_socket_offload_init,
 			NULL,

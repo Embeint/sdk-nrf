@@ -10,14 +10,9 @@ manifest:
       remote: ncs
       repo-path: sdk-nrfxlib
       path: modules/nrfconnect/nrfxlib
-      revision: 56e62181e1d65bf7c21acf128aa15c290bfcc380
+      revision: v2.9.0
     - name: oberon-psa-crypto
       remote: ncs
       path: modules/crypto/oberon-psa-crypto
       repo-path: sdk-oberon-psa-crypto
-      revision: e0800ec5283ba89b2619919ef1889d98a9a79132
-    - name: hostap
-      remote: ncs
-      repo-path: sdk-hostap
-      path: modules/nrfconnect/hostap
-      revision: 6311fde66f87ac8c8838a2d5fcfe55a498a8682a
+      revision: 21728cf8402ac567326d0d69eec891a2bfdb8ea3
