@@ -15,20 +15,23 @@
 #include <mpsl/mpsl_work.h>
 #include "multithreading_lock.h"
 #include <nrfx.h>
-#if defined(CONFIG_NRFX_DPPI)
-#include <nrfx_dppi.h>
+#if IS_ENABLED(CONFIG_SOC_COMPATIBLE_NRF54LX)
+#include <nrfx_power.h>
+#endif
+#if defined(CONFIG_SOC_SERIES_NRF54HX)
+#include <hal/nrf_dppi.h>
 #endif
 #if defined(CONFIG_MPSL_TRIGGER_IPC_TASK_ON_RTC_START)
 #include <hal/nrf_ipc.h>
 #endif
 
 #if IS_ENABLED(CONFIG_MPSL_USE_ZEPHYR_PM)
-#include <pm/mpsl_pm_utils.h>
+#include <mpsl/mpsl_pm_utils.h>
 #endif
 
 LOG_MODULE_REGISTER(mpsl_init, CONFIG_MPSL_LOG_LEVEL);
 
-#if defined(CONFIG_CLOCK_CONTROL_NRF_K32SRC_RC) && !defined(CONFIG_SOC_SERIES_NRF54HX)
+#if defined(CONFIG_MPSL_CALIBRATION_PERIOD)
 static void mpsl_calibration_work_handler(struct k_work *work);
 static K_WORK_DELAYABLE_DEFINE(calibration_work, mpsl_calibration_work_handler);
 #endif /* CONFIG_CLOCK_CONTROL_NRF_K32SRC_RC && !CONFIG_SOC_SERIES_NRF54HX */
@@ -42,11 +45,11 @@ extern void rtc_pretick_rtc0_isr_hook(void);
 	#endif
 #endif
 
-#if !defined(CONFIG_SOC_SERIES_NRF54HX) && !defined(CONFIG_SOC_SERIES_NRF54LX)
+#if !defined(CONFIG_SOC_SERIES_NRF54HX) && !defined(CONFIG_SOC_COMPATIBLE_NRF54LX)
 #define MPSL_TIMER_IRQn TIMER0_IRQn
 #define MPSL_RTC_IRQn RTC0_IRQn
 #define MPSL_RADIO_IRQn RADIO_IRQn
-#elif defined(CONFIG_SOC_SERIES_NRF54LX)
+#elif defined(CONFIG_SOC_COMPATIBLE_NRF54LX)
 #define MPSL_TIMER_IRQn TIMER10_IRQn
 #define MPSL_RTC_IRQn GRTC_3_IRQn
 #define MPSL_RADIO_IRQn RADIO_0_IRQn
@@ -59,11 +62,11 @@ extern void rtc_pretick_rtc0_isr_hook(void);
 #if defined(CONFIG_SOC_SERIES_NRF54HX)
 /* Basic build time sanity checking */
 #define MPSL_RESERVED_GRTC_CHANNELS ((1U << 8) | (1U << 9) | (1U << 10) | (1U << 11) | (1U << 12))
-#elif defined(CONFIG_SOC_SERIES_NRF54LX)
+#elif defined(CONFIG_SOC_COMPATIBLE_NRF54LX)
 #define MPSL_RESERVED_GRTC_CHANNELS ((1U << 7) | (1U << 8) | (1U << 9) | (1U << 10) | (1U << 11))
 #endif
 
-#if defined(CONFIG_SOC_SERIES_NRF54HX) || defined(CONFIG_SOC_SERIES_NRF54LX)
+#if defined(CONFIG_SOC_SERIES_NRF54HX) || defined(CONFIG_SOC_COMPATIBLE_NRF54LX)
 
 BUILD_ASSERT(MPSL_RTC_IRQn != DT_IRQN(DT_NODELABEL(grtc)), "MPSL requires a dedicated GRTC IRQ");
 
@@ -327,7 +330,7 @@ static uint8_t m_config_clock_source_get(void)
 }
 #endif /* !CONFIG_SOC_SERIES_NRF54HX */
 
-#if defined(CONFIG_CLOCK_CONTROL_NRF_K32SRC_RC) && !defined(CONFIG_SOC_SERIES_NRF54HX)
+#if defined(CONFIG_MPSL_CALIBRATION_PERIOD)
 static atomic_t do_calibration;
 
 static void mpsl_calibration_work_handler(struct k_work *work)
@@ -341,7 +344,7 @@ static void mpsl_calibration_work_handler(struct k_work *work)
 	mpsl_calibration_timer_handle();
 
 	mpsl_work_schedule(&calibration_work,
-			   K_MSEC(CONFIG_CLOCK_CONTROL_NRF_CALIBRATION_PERIOD));
+			   K_MSEC(CONFIG_MPSL_CALIBRATION_PERIOD));
 }
 #endif /* CONFIG_CLOCK_CONTROL_NRF_K32SRC_RC && !CONFIG_SOC_SERIES_NRF54HX */
 
@@ -370,8 +373,9 @@ static int32_t mpsl_lib_init_internal(void)
 		    "MPSL requires clock calibration to be enabled when RC is used as LFCLK");
 
 	/* clock_cfg.rc_ctiv is given in 1/4 seconds units.
-	 * CONFIG_CLOCK_CONTROL_NRF_CALIBRATION_PERIOD is given in ms. */
-	clock_cfg.rc_ctiv = (CONFIG_CLOCK_CONTROL_NRF_CALIBRATION_PERIOD * 4 / 1000);
+	 * CONFIG_MPSL_CALIBRATION_PERIOD is given in ms.
+	 */
+	clock_cfg.rc_ctiv = (CONFIG_MPSL_CALIBRATION_PERIOD * 4 / 1000);
 	clock_cfg.rc_temp_ctiv = CONFIG_CLOCK_CONTROL_NRF_CALIBRATION_MAX_SKIP + 1;
 	BUILD_ASSERT(CONFIG_CLOCK_CONTROL_NRF_CALIBRATION_TEMP_DIFF == 2,
 		     "MPSL always uses a temperature diff threshold of 0.5 degrees");
@@ -388,12 +392,22 @@ static int32_t mpsl_lib_init_internal(void)
 	memset(&clock_cfg, 0, sizeof(clock_cfg));
 #endif
 
+#if defined(CONFIG_SOC_SERIES_NRF54HX)
+	/* Secure domain no longer enables DPPI channels for local domains,
+	 * MPSL now has to enable the ones it uses.
+	 */
+	nrf_dppi_channels_enable(NRF_DPPIC130, DPPI_SINK_CHANNELS);
+	nrf_dppi_channels_enable(NRF_DPPIC132, DPPI_SOURCE_CHANNELS);
+#endif
 	err = mpsl_init(&clock_cfg, CONFIG_MPSL_LOW_PRIO_IRQN, m_assert_handler);
 	if (err) {
 		return err;
 	}
 
-	if (IS_ENABLED(CONFIG_SOC_NRF_FORCE_CONSTLAT)) {
+	mpsl_clock_hfclk_latency_set(CONFIG_MPSL_HFCLK_LATENCY);
+
+	if (IS_ENABLED(CONFIG_SOC_NRF_FORCE_CONSTLAT) &&
+		!IS_ENABLED(CONFIG_SOC_COMPATIBLE_NRF54LX)) {
 		mpsl_pan_rfu();
 	}
 
@@ -463,10 +477,10 @@ static int mpsl_low_prio_init(void)
 	IRQ_CONNECT(CONFIG_MPSL_LOW_PRIO_IRQN, MPSL_LOW_PRIO,
 		    mpsl_low_prio_irq_handler, NULL, 0);
 
-#if defined(CONFIG_CLOCK_CONTROL_NRF_K32SRC_RC) && !defined(CONFIG_SOC_SERIES_NRF54HX)
+#if defined(CONFIG_MPSL_CALIBRATION_PERIOD)
 	atomic_set(&do_calibration, 1);
 	mpsl_work_schedule(&calibration_work,
-			   K_MSEC(CONFIG_CLOCK_CONTROL_NRF_CALIBRATION_PERIOD));
+			   K_MSEC(CONFIG_MPSL_CALIBRATION_PERIOD));
 #endif /* CONFIG_CLOCK_CONTROL_NRF_K32SRC_RC && !CONFIG_SOC_SERIES_NRF54HX */
 
 	return 0;
@@ -493,7 +507,7 @@ int32_t mpsl_lib_init(void)
 int32_t mpsl_lib_uninit(void)
 {
 #if IS_ENABLED(CONFIG_MPSL_DYNAMIC_INTERRUPTS)
-#if defined(CONFIG_CLOCK_CONTROL_NRF_K32SRC_RC) && !defined(CONFIG_SOC_SERIES_NRF54HX)
+#if defined(CONFIG_MPSL_CALIBRATION_PERIOD)
 	atomic_set(&do_calibration, 0);
 #endif /* CONFIG_CLOCK_CONTROL_NRF_K32SRC_RC && !CONFIG_SOC_SERIES_NRF54HX */
 
@@ -506,6 +520,26 @@ int32_t mpsl_lib_uninit(void)
 	return -NRF_EPERM;
 #endif /* IS_ENABLED(CONFIG_MPSL_DYNAMIC_INTERRUPTS) */
 }
+
+#if defined(CONFIG_SOC_COMPATIBLE_NRF54LX)
+void mpsl_constlat_request_callback(void)
+{
+#if defined(CONFIG_NRFX_POWER)
+	nrfx_power_constlat_mode_request();
+#else
+	nrf_power_task_trigger(NRF_POWER, NRF_POWER_TASK_CONSTLAT);
+#endif
+}
+
+void mpsl_lowpower_request_callback(void)
+{
+#if defined(CONFIG_NRFX_POWER)
+	nrfx_power_constlat_mode_free();
+#else
+	nrf_power_task_trigger(NRF_POWER, NRF_POWER_TASK_LOWPWR);
+#endif
+}
+#endif /* defined(CONFIG_SOC_COMPATIBLE_NRF54LX) */
 
 SYS_INIT(mpsl_lib_init_sys, PRE_KERNEL_1, CONFIG_KERNEL_INIT_PRIORITY_DEFAULT);
 SYS_INIT(mpsl_low_prio_init, POST_KERNEL,

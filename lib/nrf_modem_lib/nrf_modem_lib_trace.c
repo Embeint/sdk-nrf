@@ -21,6 +21,7 @@ LOG_MODULE_REGISTER(nrf_modem_lib_trace, CONFIG_NRF_MODEM_LIB_LOG_LEVEL);
 K_SEM_DEFINE(trace_sem, 0, 1);
 K_SEM_DEFINE(trace_clear_sem, 0, 1);
 K_SEM_DEFINE(trace_done_sem, 1, 1);
+K_SEM_DEFINE(modem_trace_level_sem, 1, 1);
 
 extern struct nrf_modem_lib_trace_backend trace_backend;
 static bool has_space = true;
@@ -234,13 +235,11 @@ int nrf_modem_lib_trace_processing_done_wait(k_timeout_t timeout)
 static int trace_fragment_write(struct nrf_modem_trace_data *frag)
 {
 	int ret;
-	size_t remaining = frag->len;
 
-	while (remaining) {
+	while (frag->len) {
 		PERF_START();
 
-		ret = trace_backend.write((void *)((uint8_t *)frag->data + frag->len - remaining),
-					  remaining);
+		ret = trace_backend.write(frag->data, frag->len);
 
 		PERF_END(ret);
 
@@ -262,11 +261,16 @@ static int trace_fragment_write(struct nrf_modem_trace_data *frag)
 		}
 
 		if (ret < 0) {
-			LOG_ERR("trace_backend.write failed with err: %d", ret);
+			if (ret != -ENOSPC) {
+				LOG_ERR("trace_backend.write failed with err: %d", ret);
+			}
+
 			return ret;
 		}
 
-		remaining -= ret;
+		/* Alter trace fragment to contain what is not written */
+		frag->data = (void *)((uint8_t *)frag->data + ret);
+		frag->len -= ret;
 	}
 
 	return 0;
@@ -314,13 +318,13 @@ trace_reset:
 		}
 
 		for (int i = 0; i < n_frags; i++) {
+retry:
 			err = trace_fragment_write(&frags[i]);
 			switch (err) {
 			case 0:
 				break;
 			case -ENOSPC:
 				nrf_modem_lib_trace_callback(NRF_MODEM_LIB_TRACE_EVT_FULL);
-
 				if (!trace_backend.clear) {
 					goto deinit;
 				}
@@ -329,8 +333,26 @@ trace_reset:
 				k_sem_give(&trace_done_sem);
 				k_sem_take(&trace_clear_sem, K_FOREVER);
 				/* Try the same fragment again */
-				i--;
-				continue;
+				goto retry;
+
+			case -ENOSR:
+				if (k_sem_take(&modem_trace_level_sem, K_NO_WAIT) != 0) {
+					/** If modem trace level is off, we wait for modem
+					 *  trace level semaphore, indicating modem traces
+					 *  are enabled. This is always available unless
+					 *  nrf_modem_lib_trace_level_set() is called with
+					 *  level 0 (off).
+					 */
+					k_sem_give(&trace_done_sem);
+					k_sem_take(&modem_trace_level_sem, K_FOREVER);
+					k_sem_take(&trace_done_sem, K_FOREVER);
+				}
+
+				k_sem_give(&modem_trace_level_sem);
+
+				/* Try the same fragment again */
+				goto retry;
+
 			default:
 				/* Irrecoverable error */
 				goto deinit;
@@ -441,8 +463,10 @@ int nrf_modem_lib_trace_level_set(enum nrf_modem_lib_trace_level trace_level)
 
 	if (tl) {
 		err = nrf_modem_at_printf("AT%%XMODEMTRACE=1,%d", tl);
+		k_sem_give(&modem_trace_level_sem);
 	} else {
 		err = nrf_modem_at_printf("AT%%XMODEMTRACE=0");
+		k_sem_take(&modem_trace_level_sem, K_NO_WAIT);
 	}
 
 	if (err) {
@@ -473,6 +497,14 @@ int nrf_modem_lib_trace_read(uint8_t *buf, size_t len)
 	read = trace_backend.read(buf, len);
 	if (read > 0) {
 		UPDATE_TRACE_BYTES_READ(read);
+		/* Traces are read, we can attempt to write more. */
+		has_space = true;
+/* Flash backend needs to wait for a sector to be cleared and will give the semaphore instead.
+ * This should be cleaned up with a separate API, but we declare the semaphore as extern for now.
+ */
+#if !defined(CONFIG_NRF_MODEM_LIB_TRACE_BACKEND_FLASH)
+		k_sem_give(&trace_clear_sem);
+#endif
 	}
 
 	return read;

@@ -24,6 +24,7 @@
 #include <sdc_soc.h>
 #include <sdc_hci.h>
 #include <sdc_hci_vs.h>
+#include <mpsl.h>
 #include <mpsl/mpsl_work.h>
 #include <mpsl/mpsl_lib.h>
 
@@ -32,11 +33,19 @@
 #include "ecdh.h"
 #include "radio_nrf5_txp.h"
 
-#define DT_DRV_COMPAT zephyr_bt_hci_ll_sw_split
+#define DT_DRV_COMPAT nordic_bt_hci_sdc
 
 #define LOG_LEVEL CONFIG_BT_HCI_DRIVER_LOG_LEVEL
 #include "zephyr/logging/log.h"
 LOG_MODULE_REGISTER(bt_sdc_hci_driver);
+
+
+#if defined(CONFIG_BT_BUF_EVT_DISCARDABLE_COUNT)
+#define HCI_RX_BUF_SIZE MAX(BT_BUF_RX_SIZE, \
+			BT_BUF_EVT_SIZE(CONFIG_BT_BUF_EVT_DISCARDABLE_SIZE))
+#else
+#define HCI_RX_BUF_SIZE BT_BUF_RX_SIZE
+#endif
 
 #if defined(CONFIG_BT_CONN) && defined(CONFIG_BT_CENTRAL)
 
@@ -183,6 +192,12 @@ BUILD_ASSERT(!IS_ENABLED(CONFIG_BT_PERIPHERAL) ||
 #define SDC_SUBRATING_MEM_SIZE 0
 #endif
 
+#if defined(CONFIG_BT_CTLR_SYNC_TRANSFER_RECEIVER) || defined(CONFIG_BT_CTLR_SYNC_TRANSFER_SENDER)
+#define SDC_SYNC_TRANSFER_MEM_SIZE SDC_MEM_SYNC_TRANSFER(SDC_CENTRAL_COUNT + PERIPHERAL_COUNT)
+#else
+#define SDC_SYNC_TRANSFER_MEM_SIZE 0
+#endif
+
 #if defined(CONFIG_BT_CTLR_CONN_ISO)
 #define SDC_MEM_CIG SDC_MEM_PER_CIG(CONFIG_BT_CTLR_CONN_ISO_GROUPS)
 #define SDC_MEM_CIS \
@@ -246,11 +261,20 @@ BUILD_ASSERT(!IS_ENABLED(CONFIG_BT_PERIPHERAL) ||
 #define SDC_MEM_CHAN_SURV 0
 #endif
 
+#if defined(CONFIG_BT_CTLR_SDC_CS_COUNT)
+#define SDC_MEM_CS_POOL							\
+	SDC_MEM_CS(CONFIG_BT_CTLR_SDC_CS_COUNT) +	\
+	SDC_MEM_CS_SETUP_PHASE_LINKS(SDC_CENTRAL_COUNT + PERIPHERAL_COUNT)
+#else
+#define SDC_MEM_CS_POOL 0
+#endif
+
 #define MEMPOOL_SIZE ((PERIPHERAL_COUNT * PERIPHERAL_MEM_SIZE) + \
 		      (SDC_CENTRAL_COUNT * CENTRAL_MEM_SIZE) + \
 		      (SDC_ADV_SET_MEM_SIZE) + \
 		      (SDC_LE_POWER_CONTROL_MEM_SIZE) + \
 		      (SDC_SUBRATING_MEM_SIZE) + \
+		      (SDC_SYNC_TRANSFER_MEM_SIZE) + \
 		      (SDC_PERIODIC_ADV_MEM_SIZE) + \
 		      (SDC_PERIODIC_ADV_RSP_MEM_SIZE) + \
 		      (SDC_PERIODIC_SYNC_MEM_SIZE) + \
@@ -264,7 +288,8 @@ BUILD_ASSERT(!IS_ENABLED(CONFIG_BT_PERIPHERAL) ||
 		      (SDC_MEM_BIS_SINK) + \
 		      (SDC_MEM_BIS_SOURCE) + \
 		      (SDC_MEM_ISO_RX_PDU_POOL) + \
-		      (SDC_MEM_ISO_TX_POOL))
+		      (SDC_MEM_ISO_TX_POOL) + \
+		      (SDC_MEM_CS_POOL))
 
 #if defined(CONFIG_BT_SDC_ADDITIONAL_MEMORY)
 __aligned(8) uint8_t sdc_mempool[MEMPOOL_SIZE + CONFIG_BT_SDC_ADDITIONAL_MEMORY];
@@ -424,6 +449,14 @@ static void data_packet_process(const struct device *dev, uint8_t *hci_buf)
 	pb = bt_acl_flags_pb(flags);
 	bc = bt_acl_flags_bc(flags);
 
+	if (len + sizeof(*hdr) > HCI_RX_BUF_SIZE) {
+		LOG_ERR("Event buffer too small. %u > %u",
+			len + sizeof(*hdr),
+			HCI_RX_BUF_SIZE);
+		k_panic();
+		return;
+	}
+
 	LOG_DBG("Data: handle (0x%02x), PB(%01d), BC(%01d), len(%u)", handle,
 	       pb, bc, len);
 
@@ -440,6 +473,14 @@ static void iso_data_packet_process(const struct device *dev, uint8_t *hci_buf)
 	struct bt_hci_iso_hdr *hdr = (void *)hci_buf;
 
 	uint16_t len = sys_le16_to_cpu(hdr->len);
+
+	if (len + sizeof(*hdr) > HCI_RX_BUF_SIZE) {
+		LOG_ERR("Event buffer too small. %u > %u",
+			len + sizeof(*hdr),
+			HCI_RX_BUF_SIZE);
+		k_panic();
+		return;
+	}
 
 	net_buf_add_mem(data_buf, &hci_buf[0], len + sizeof(*hdr));
 
@@ -481,6 +522,8 @@ static bool event_packet_is_discardable(const uint8_t *hci_buf)
 		switch (subevent) {
 		case SDC_HCI_SUBEVENT_VS_QOS_CONN_EVENT_REPORT:
 			return true;
+		case SDC_HCI_SUBEVENT_VS_CONN_ANCHOR_POINT_UPDATE_REPORT:
+			return true;
 		default:
 			return false;
 		}
@@ -495,6 +538,14 @@ static void event_packet_process(const struct device *dev, uint8_t *hci_buf)
 	bool discardable = event_packet_is_discardable(hci_buf);
 	struct bt_hci_evt_hdr *hdr = (void *)hci_buf;
 	struct net_buf *evt_buf;
+
+	if (hdr->len + sizeof(*hdr) > HCI_RX_BUF_SIZE) {
+		LOG_ERR("Event buffer too small. %u > %u",
+			hdr->len + sizeof(*hdr),
+			HCI_RX_BUF_SIZE);
+		k_panic();
+		return;
+	}
 
 	if (hdr->evt == BT_HCI_EVT_LE_META_EVENT) {
 		struct bt_hci_evt_le_meta_event *me = (void *)&hci_buf[2];
@@ -572,12 +623,7 @@ static bool fetch_and_process_hci_msg(const struct device *dev, uint8_t *p_hci_b
 
 void hci_driver_receive_process(void)
 {
-#if defined(CONFIG_BT_BUF_EVT_DISCARDABLE_COUNT)
-	static uint8_t hci_buf[MAX(BT_BUF_RX_SIZE,
-				   BT_BUF_EVT_SIZE(CONFIG_BT_BUF_EVT_DISCARDABLE_SIZE))];
-#else
-	static uint8_t hci_buf[BT_BUF_RX_SIZE];
-#endif
+	static uint8_t hci_buf[HCI_RX_BUF_SIZE];
 
 	const struct device *dev = DEVICE_DT_GET(DT_DRV_INST(0));
 
@@ -889,6 +935,24 @@ static int configure_supported_features(void)
 		}
 	}
 
+	if (IS_ENABLED(CONFIG_BT_CTLR_CHANNEL_SOUNDING)) {
+		err = sdc_support_channel_sounding_test();
+		if (err) {
+			return -ENOTSUP;
+		}
+		err = sdc_support_channel_sounding();
+		if (err) {
+			return -ENOTSUP;
+		}
+	}
+
+	if (IS_ENABLED(CONFIG_BT_CTLR_SDC_LE_POWER_CLASS_1)) {
+		err = sdc_support_le_power_class_1();
+		if (err) {
+			return -ENOTSUP;
+		}
+	}
+
 	return 0;
 }
 
@@ -1147,6 +1211,29 @@ static int configure_memory_usage(void)
 	defined(CONFIG_BT_CTLR_SDC_ISO_TX_PDU_BUFFER_PER_STREAM_COUNT))
 	required_memory = sdc_cfg_set(SDC_DEFAULT_RESOURCE_CFG_TAG,
 					  SDC_CFG_TYPE_ISO_BUFFER_CFG, &cfg);
+	if (required_memory < 0) {
+		return required_memory;
+	}
+#endif
+
+#if defined(CONFIG_BT_CTLR_SDC_CS_COUNT)
+	cfg.cs_count.count = CONFIG_BT_CTLR_SDC_CS_COUNT;
+	required_memory = sdc_cfg_set(SDC_DEFAULT_RESOURCE_CFG_TAG,
+									SDC_CFG_TYPE_CS_COUNT,
+									&cfg);
+	if (required_memory < 0) {
+		return required_memory;
+	}
+#endif
+
+#if defined(CONFIG_BT_CTLR_SDC_CS_COUNT)
+	cfg.cs_cfg.max_antenna_paths_supported = CONFIG_BT_CTLR_SDC_CS_MAX_ANTENNA_PATHS;
+	cfg.cs_cfg.num_antennas_supported = CONFIG_BT_CTLR_SDC_CS_NUM_ANTENNAS;
+	cfg.cs_cfg.step_mode3_supported = IS_ENABLED(CONFIG_BT_CTLR_SDC_CS_STEP_MODE3);
+
+	required_memory = sdc_cfg_set(SDC_DEFAULT_RESOURCE_CFG_TAG,
+									SDC_CFG_TYPE_CS_CFG,
+									&cfg);
 	if (required_memory < 0) {
 		return required_memory;
 	}
