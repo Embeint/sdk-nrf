@@ -4,10 +4,6 @@
 # SPDX-License-Identifier: LicenseRef-Nordic-5-Clause
 #
 
-choice BT_LL_CHOICE
-	prompt "Bluetooth Link Layer Selection"
-	default BT_LL_SOFTDEVICE
-
 config BT_LL_SOFTDEVICE
 	bool "SoftDevice Link Layer"
 	select MPSL
@@ -45,13 +41,13 @@ config BT_LL_SOFTDEVICE
 	select BT_CTLR_SUBRATING_SUPPORT
 	select BT_LL_SOFTDEVICE_HEADERS_INCLUDE
 	select SOC_NRF54H20_NO_MRAM_LATENCY if SOC_NRF54H20_CPURAD
+	select HAS_BT_CTLR
 	depends on (SOC_SERIES_BSIM_NRFXX || SOC_SERIES_NRF52X || SOC_COMPATIBLE_NRF5340_CPUNET ||\
 			    SOC_NRF54H20_CPURAD || SOC_SERIES_NRF54LX)
 	depends on DT_HAS_NORDIC_BT_HCI_SDC_ENABLED
+	default y
 	help
 	  Use SoftDevice Link Layer implementation.
-
-endchoice
 
 config BT_CTLR_DF_SUPPORT
 	select BT_CTLR_DF_CTE_TX_SUPPORT
