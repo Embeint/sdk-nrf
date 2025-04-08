@@ -1,0 +1,9 @@
+# CRACEN drivers
+
+config CRACEN_LIB_KMU
+	bool "CRACEN KMU library"
+	depends on SOC_SERIES_NRF54LX
+	select NRFX_RRAMC if !BUILD_WITH_TFM
+	default y
+	help
+	  The CRACEN KMU library.
