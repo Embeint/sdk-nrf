@@ -67,17 +67,17 @@ void lte_net_if_modem_fault_handler(struct nrf_modem_fault_info *fault_info)
 
 static uint16_t pdn_mtu(void)
 {
-	unsigned int mtu;
+	struct pdn_dynamic_info info;
 	int rc;
 
-	rc = pdn_dynamic_params_get(0, NULL, NULL, &mtu);
-	if ((rc != 0) || (mtu == 0)) {
-		LOG_WRN("MTU query failed, error: %d, MTU: %d", rc, mtu);
+	rc = pdn_dynamic_info_get(0, &info);
+	if ((rc != 0) || (info.ipv4_mtu == 0)) {
+		LOG_WRN("MTU query failed, error: %d, MTU: %d", rc, info.ipv4_mtu);
 		/* Fallback to the minimum value that IPv4 is required to support */
-		mtu = NET_IPV4_MTU;
+		info.ipv4_mtu = NET_IPV4_MTU;
 	}
-	LOG_DBG("Network MTU: %d", mtu);
-	return mtu;
+	LOG_DBG("Network MTU: %d", info.ipv4_mtu);
+	return info.ipv4_mtu;
 }
 
 /* Called when we detect LTE connectivity has been gained.

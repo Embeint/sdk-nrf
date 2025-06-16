@@ -167,6 +167,10 @@ static int parse_ncellmeas_gci(struct lte_lc_ncellmeas_params *params, const cha
 		goto clean_exit;
 	} else if (status == AT_NCELLMEAS_STATUS_VALUE_INCOMPLETE) {
 		LOG_WRN("NCELLMEAS interrupted; results incomplete");
+		if (param_count == 3) {
+			/* No results, skip parsing. */
+			goto clean_exit;
+		}
 	}
 
 	/* Go through the cells */
@@ -425,6 +429,14 @@ static int parse_ncellmeas(const char *at_response, struct lte_lc_cells_info *ce
 	err = at_parser_init(&parser, at_response);
 	__ASSERT_NO_MSG(err == 0);
 
+	err = at_parser_cmd_count_get(&parser, &count);
+	if (err) {
+		LOG_ERR("Could not get NCELLMEAS param count, "
+			"potentially malformed notification, error: %d",
+			err);
+		goto clean_exit;
+	}
+
 	/* Status code */
 	err = at_parser_num_get(&parser, AT_NCELLMEAS_STATUS_INDEX, &status);
 	if (err) {
@@ -437,6 +449,10 @@ static int parse_ncellmeas(const char *at_response, struct lte_lc_cells_info *ce
 		goto clean_exit;
 	} else if (status == AT_NCELLMEAS_STATUS_VALUE_INCOMPLETE) {
 		LOG_WRN("NCELLMEAS interrupted; results incomplete");
+		if (count == 2) {
+			/* No results, skip parsing. */
+			goto clean_exit;
+		}
 	}
 
 	/* Current cell ID */
@@ -518,14 +534,6 @@ static int parse_ncellmeas(const char *at_response, struct lte_lc_cells_info *ce
 	size_t ta_meas_time_index = AT_NCELLMEAS_PRE_NCELLS_PARAMS_COUNT +
 				    cells->ncells_count * AT_NCELLMEAS_N_PARAMS_COUNT;
 
-	err = at_parser_cmd_count_get(&parser, &count);
-	if (err) {
-		LOG_ERR("Could not get NCELLMEAS param count, "
-			"potentially malformed notification, error: %d",
-			err);
-		goto clean_exit;
-	}
-
 	if (count > ta_meas_time_index) {
 		err = at_parser_num_get(&parser, ta_meas_time_index,
 					&cells->current_cell.timing_advance_meas_time);
@@ -602,6 +610,17 @@ clean_exit:
 	return err;
 }
 
+static void ncellmeas_empty_event_dispatch(void)
+{
+	struct lte_lc_evt evt = {0};
+
+	LOG_DBG("Dispatching empty LTE_LC_EVT_NEIGHBOR_CELL_MEAS event");
+
+	evt.type = LTE_LC_EVT_NEIGHBOR_CELL_MEAS;
+	evt.cells_info.current_cell.id = LTE_LC_CELL_EUTRAN_ID_INVALID;
+	event_handler_list_dispatch(&evt);
+}
+
 static void at_handler_ncellmeas_gci(const char *response)
 {
 	int err;
@@ -617,6 +636,7 @@ static void at_handler_ncellmeas_gci(const char *response)
 	cells = k_calloc(ncellmeas_params.gci_count, sizeof(struct lte_lc_cell));
 	if (cells == NULL) {
 		LOG_ERR("Failed to allocate memory for the GCI cells");
+		ncellmeas_empty_event_dispatch();
 		return;
 	}
 
@@ -638,12 +658,24 @@ static void at_handler_ncellmeas_gci(const char *response)
 		break;
 	default:
 		LOG_ERR("Parsing of neighbor cells failed, err: %d", err);
+		ncellmeas_empty_event_dispatch();
 		break;
 	}
 
 	k_free(cells);
 	k_free(evt.cells_info.neighbor_cells);
 }
+
+static void ncellmeas_cancel_timeout_work_fn(struct k_work *work)
+{
+	LOG_DBG("No %%NCELLMEAS notification received after AT%%NCELLMEASSTOP");
+
+	ncellmeas_empty_event_dispatch();
+
+	k_sem_give(&ncellmeas_idle_sem);
+}
+
+K_WORK_DELAYABLE_DEFINE(ncellmeas_cancel_timeout_work, ncellmeas_cancel_timeout_work_fn);
 
 static void at_handler_ncellmeas(const char *response)
 {
@@ -652,10 +684,22 @@ static void at_handler_ncellmeas(const char *response)
 
 	__ASSERT_NO_MSG(response != NULL);
 
+	k_work_cancel_delayable(&ncellmeas_cancel_timeout_work);
+
 	if (event_handler_list_is_empty()) {
 		/* No need to parse the response if there is no handler
 		 * to receive the parsed data.
 		 */
+		goto exit;
+	}
+
+	if (k_sem_count_get(&ncellmeas_idle_sem) > 0) {
+		/* No need to parse the notification because neighbor cell measurement
+		 * has not been requested.
+		 */
+		LOG_DBG("%%NCELLMEAS notification not parsed because "
+			"lte_lc_neighbor_cell_measurement() not called");
+
 		goto exit;
 	}
 
@@ -673,6 +717,7 @@ static void at_handler_ncellmeas(const char *response)
 		neighbor_cells = k_calloc(ncell_count, sizeof(struct lte_lc_ncell));
 		if (neighbor_cells == NULL) {
 			LOG_ERR("Failed to allocate memory for neighbor cells");
+			ncellmeas_empty_event_dispatch();
 			goto exit;
 		}
 	}
@@ -694,6 +739,7 @@ static void at_handler_ncellmeas(const char *response)
 		break;
 	default:
 		LOG_ERR("Parsing of neighbor cells failed, err: %d", err);
+		ncellmeas_empty_event_dispatch();
 		break;
 	}
 
@@ -785,7 +831,11 @@ int ncellmeas_cancel(void)
 		err = -EFAULT;
 	}
 
-	k_sem_give(&ncellmeas_idle_sem);
+	/* Transition to idle happens when %NCELLMEAS notification is received. However, if modem
+	 * had not yet started the measurement, no notification is sent and we need a timeout to
+	 * handle it.
+	 */
+	k_work_schedule(&ncellmeas_cancel_timeout_work, K_SECONDS(2));
 
 	return err;
 }
