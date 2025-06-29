@@ -37,6 +37,7 @@ def export(upstream: pathlib.Path, output: pathlib.Path):
     tree_replace(upstream, output, ["lib", "at_host"])
     tree_replace(upstream, output, ["lib", "at_monitor"])
     tree_replace(upstream, output, ["lib", "lte_link_control"])
+    tree_replace(upstream, output, ["lib", "modem_antenna"])
     tree_replace(upstream, output, ["lib", "modem_key_mgmt"])
     tree_replace(upstream, output, ["lib", "multithreading_lock"])
     tree_replace(upstream, output, ["lib", "nrf_modem_lib"])
