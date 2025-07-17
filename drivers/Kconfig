@@ -15,4 +15,6 @@ if MPSL && !MPSL_FEM_ONLY
 rsource "mpsl/Kconfig"
 endif
 
+rsource "serial/Kconfig"
+
 endmenu

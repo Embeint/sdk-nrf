@@ -29,6 +29,7 @@ def export(upstream: pathlib.Path, output: pathlib.Path):
     tree_replace(upstream, output, ["drivers", "bluetooth"])
     tree_replace(upstream, output, ["drivers", "entropy"])
     tree_replace(upstream, output, ["drivers", "mpsl"])
+    tree_replace(upstream, output, ["drivers", "serial"])
     tree_replace(upstream, output, ["dts", "bindings", "radio_coex"])
     tree_replace(upstream, output, ["include", "bluetooth"])
     tree_replace(upstream, output, ["include", "modem"])
