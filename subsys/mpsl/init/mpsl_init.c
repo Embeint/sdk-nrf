@@ -9,6 +9,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/__assert.h>
+#include <zephyr/drivers/clock_control/nrf_clock_control.h>
 #include <mpsl.h>
 #include <mpsl_timeslot.h>
 #include <mpsl/mpsl_assert.h>
@@ -53,11 +54,24 @@ extern void rtc_pretick_rtc0_isr_hook(void);
 	#endif
 #endif
 
-#if !defined(CONFIG_SOC_SERIES_NRF54HX) && !defined(CONFIG_SOC_COMPATIBLE_NRF54LX)
+#if IS_ENABLED(CONFIG_COUNTER)
+#if IS_ENABLED(CONFIG_SOC_COMPATIBLE_NRF52X) || IS_ENABLED(CONFIG_SOC_NRF5340_CPUNET)
+BUILD_ASSERT(!IS_ENABLED(CONFIG_NRFX_RTC0), "MPSL reserves RTC0 on this SoC.");
+BUILD_ASSERT(!IS_ENABLED(CONFIG_NRFX_TIMER0), "MPSL reserves TIMER0 on this SoC.");
+#elif IS_ENABLED(CONFIG_SOC_COMPATIBLE_NRF54LX) || IS_ENABLED(CONFIG_SOC_SERIES_NRF71X)
+BUILD_ASSERT(!IS_ENABLED(CONFIG_NRFX_TIMER10), "MPSL reserves TIMER10 on this SoC");
+#elif IS_ENABLED(CONFIG_SOC_SERIES_NRF54HX)
+BUILD_ASSERT(!IS_ENABLED(CONFIG_NRFX_TIMER020), "MPSL reserves TIMER020 on this SoC");
+#else
+#error
+#endif
+#endif /* IS_ENABLED(CONFIG_COUNTER) */
+
+#if defined(CONFIG_SOC_COMPATIBLE_NRF52X) || defined(CONFIG_SOC_COMPATIBLE_NRF53X)
 #define MPSL_TIMER_IRQn TIMER0_IRQn
 #define MPSL_RTC_IRQn RTC0_IRQn
 #define MPSL_RADIO_IRQn RADIO_IRQn
-#elif defined(CONFIG_SOC_COMPATIBLE_NRF54LX)
+#elif defined(CONFIG_SOC_COMPATIBLE_NRF54LX) || defined(CONFIG_SOC_SERIES_NRF71X)
 #define MPSL_TIMER_IRQn TIMER10_IRQn
 #define MPSL_RTC_IRQn GRTC_3_IRQn
 #define MPSL_RADIO_IRQn RADIO_0_IRQn
@@ -70,11 +84,13 @@ extern void rtc_pretick_rtc0_isr_hook(void);
 #if defined(CONFIG_SOC_SERIES_NRF54HX)
 /* Basic build time sanity checking */
 #define MPSL_RESERVED_GRTC_CHANNELS ((1U << 8) | (1U << 9) | (1U << 10) | (1U << 11) | (1U << 12))
-#elif defined(CONFIG_SOC_COMPATIBLE_NRF54LX)
+#elif defined(CONFIG_SOC_COMPATIBLE_NRF54LX) || defined(CONFIG_SOC_SERIES_NRF71X)
 #define MPSL_RESERVED_GRTC_CHANNELS ((1U << 7) | (1U << 8) | (1U << 9) | (1U << 10) | (1U << 11))
 #endif
 
-#if defined(CONFIG_SOC_SERIES_NRF54HX) || defined(CONFIG_SOC_COMPATIBLE_NRF54LX)
+#if defined(CONFIG_SOC_SERIES_NRF54HX) || \
+	defined(CONFIG_SOC_COMPATIBLE_NRF54LX) || \
+	defined(CONFIG_SOC_SERIES_NRF71X)
 
 BUILD_ASSERT(MPSL_RTC_IRQn != DT_IRQN(DT_NODELABEL(grtc)), "MPSL requires a dedicated GRTC IRQ");
 
@@ -148,6 +164,11 @@ BUILD_ASSERT((IPCT_SOURCE_CHANNELS & MPSL_RESERVED_IPCT_SOURCE_CHANNELS) ==
 	     "The required IPCT source channels are not reserved");
 
 #endif
+
+#if defined(CONFIG_SOC_SERIES_NRF54LX)
+BUILD_ASSERT(NRF_CONFIG_CPU_FREQ_MHZ == 128, "Currently mpsl only works when frequency is 128MHz");
+#endif
+
 #define MPSL_LOW_PRIO (4)
 
 #if IS_ENABLED(CONFIG_ZERO_LATENCY_IRQS)
@@ -202,8 +223,6 @@ static void mpsl_timer0_isr_wrapper(const void *args)
 	ARG_UNUSED(args);
 
 	MPSL_IRQ_TIMER0_Handler();
-
-	ISR_DIRECT_PM();
 }
 
 static void mpsl_rtc0_isr_wrapper(const void *args)
@@ -216,8 +235,6 @@ static void mpsl_rtc0_isr_wrapper(const void *args)
 	}
 
 	MPSL_IRQ_RTC0_Handler();
-
-	ISR_DIRECT_PM();
 }
 
 static void mpsl_radio_isr_wrapper(const void *args)
@@ -225,8 +242,6 @@ static void mpsl_radio_isr_wrapper(const void *args)
 	ARG_UNUSED(args);
 
 	MPSL_IRQ_RADIO_Handler();
-
-	ISR_DIRECT_PM();
 }
 
 static void mpsl_lib_irq_disable(void)
@@ -257,12 +272,7 @@ ISR_DIRECT_DECLARE(mpsl_timer0_isr_wrapper)
 {
 	MPSL_IRQ_TIMER0_Handler();
 
-	ISR_DIRECT_PM();
-
-	/* We may need to reschedule in case a radio timeslot callback
-	 * accesses zephyr primitives.
-	 */
-	return 1;
+	return 0;
 }
 
 ISR_DIRECT_DECLARE(mpsl_rtc0_isr_wrapper)
@@ -273,11 +283,6 @@ ISR_DIRECT_DECLARE(mpsl_rtc0_isr_wrapper)
 	}
 	MPSL_IRQ_RTC0_Handler();
 
-	ISR_DIRECT_PM();
-
-	/* No need for rescheduling, because the interrupt handler
-	 * does not access zephyr primitives.
-	 */
 	return 0;
 }
 
@@ -285,12 +290,7 @@ ISR_DIRECT_DECLARE(mpsl_radio_isr_wrapper)
 {
 	MPSL_IRQ_RADIO_Handler();
 
-	ISR_DIRECT_PM();
-
-	/* We may need to reschedule in case a radio timeslot callback
-	 * accesses zephyr primitives.
-	 */
-	return 1;
+	return 0;
 }
 #endif /* IS_ENABLED(CONFIG_MPSL_DYNAMIC_INTERRUPTS) */
 
@@ -472,18 +472,12 @@ static int mpsl_lib_init_sys(void)
 	/* Ensure IRQs are disabled before attaching. */
 	mpsl_lib_irq_disable();
 
-	/* We may need to reschedule in case a radio timeslot callback
-	 * accesses Zephyr primitives.
-	 * The RTC0 interrupt handler does not access zephyr primitives,
-	 * however, as this decision needs to be made during build-time,
-	 * rescheduling is performed to account for user-provided handlers.
-	 */
 	ARM_IRQ_DIRECT_DYNAMIC_CONNECT(MPSL_TIMER_IRQn, MPSL_HIGH_IRQ_PRIORITY, IRQ_CONNECT_FLAGS,
-				       reschedule);
+				       no_reschedule);
 	ARM_IRQ_DIRECT_DYNAMIC_CONNECT(MPSL_RTC_IRQn, MPSL_HIGH_IRQ_PRIORITY, IRQ_CONNECT_FLAGS,
-				       reschedule);
+				       no_reschedule);
 	ARM_IRQ_DIRECT_DYNAMIC_CONNECT(MPSL_RADIO_IRQn, MPSL_HIGH_IRQ_PRIORITY, IRQ_CONNECT_FLAGS,
-				       reschedule);
+				       no_reschedule);
 
 	mpsl_lib_irq_connect();
 #else /* !IS_ENABLED(CONFIG_MPSL_DYNAMIC_INTERRUPTS) */
@@ -530,6 +524,12 @@ int32_t mpsl_lib_init(void)
 	}
 
 	mpsl_lib_irq_connect();
+
+#if defined(CONFIG_MPSL_CALIBRATION_PERIOD)
+	atomic_set(&do_calibration, 1);
+	mpsl_work_schedule(&calibration_work,
+			   K_MSEC(CONFIG_MPSL_CALIBRATION_PERIOD));
+#endif /* CONFIG_MPSL_CALIBRATION_PERIOD */
 
 	return 0;
 #else /* !IS_ENABLED(CONFIG_MPSL_DYNAMIC_INTERRUPTS) */

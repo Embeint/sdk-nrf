@@ -873,7 +873,7 @@ static void api_irq_tx_enable(const struct device *dev)
 	data->int_driven.tx_enabled = true;
 	if (data->tx_buf == NULL) {
 		/* We need to move to the interrupt context of the same priority as UARTE. */
-		k_timer_start(&data->int_driven.trampoline_timer, K_USEC(1), K_NO_WAIT);
+		k_timer_start(&data->int_driven.trampoline_timer, K_NO_WAIT, K_NO_WAIT);
 	}
 }
 

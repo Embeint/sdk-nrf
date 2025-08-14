@@ -48,7 +48,6 @@ def export(upstream: pathlib.Path, output: pathlib.Path):
     tree_replace(upstream, output, ["subsys", "bluetooth", "host_extensions"])
     tree_replace(upstream, output, ["subsys", "mpsl"])
     file_replace(upstream, output, ["cmake", "version.cmake"])
-    file_replace(upstream, output, ["ncs_version.h.in"])
     file_replace(upstream, output, ["VERSION"])
 
     # Files we do not want
