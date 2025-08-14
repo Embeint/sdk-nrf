@@ -979,17 +979,43 @@ static int configure_supported_features(void)
 		}
 	}
 
-	if (IS_ENABLED(CONFIG_BT_CTLR_CHANNEL_SOUNDING)) {
+	if (IS_ENABLED(CONFIG_BT_CTLR_CHANNEL_SOUNDING_TEST)) {
 		err = sdc_support_channel_sounding_test();
 		if (err) {
 			return -ENOTSUP;
 		}
+	}
+
+	if (IS_ENABLED(CONFIG_BT_CTLR_CHANNEL_SOUNDING)) {
 #if defined(CONFIG_BT_CTLR_SDC_CS_MULTIPLE_ANTENNA_SUPPORT)
 		err = sdc_support_channel_sounding(cs_antenna_switch_func);
 		cs_antenna_switch_init();
 #else
 		err = sdc_support_channel_sounding(NULL);
 #endif
+		if (err) {
+			return -ENOTSUP;
+		}
+	}
+
+	if (IS_ENABLED(CONFIG_BT_CTLR_SDC_CS_STEP_MODE3)) {
+		err = sdc_support_channel_sounding_mode3();
+		if (err) {
+			return -ENOTSUP;
+		}
+	}
+
+	if (IS_ENABLED(CONFIG_BT_CTLR_SDC_CS_ROLE_INITIATOR_ONLY) ||
+		IS_ENABLED(CONFIG_BT_CTLR_SDC_CS_ROLE_BOTH)) {
+		err = sdc_support_channel_sounding_initiator_role();
+		if (err) {
+			return -ENOTSUP;
+		}
+	}
+
+	if (IS_ENABLED(CONFIG_BT_CTLR_SDC_CS_ROLE_REFLECTOR_ONLY) ||
+		IS_ENABLED(CONFIG_BT_CTLR_SDC_CS_ROLE_BOTH)) {
+		err = sdc_support_channel_sounding_reflector_role();
 		if (err) {
 			return -ENOTSUP;
 		}
@@ -1278,7 +1304,6 @@ static int configure_memory_usage(void)
 #if defined(CONFIG_BT_CTLR_SDC_CS_COUNT)
 	cfg.cs_cfg.max_antenna_paths_supported = CONFIG_BT_CTLR_SDC_CS_MAX_ANTENNA_PATHS;
 	cfg.cs_cfg.num_antennas_supported = CONFIG_BT_CTLR_SDC_CS_NUM_ANTENNAS;
-	cfg.cs_cfg.step_mode3_supported = IS_ENABLED(CONFIG_BT_CTLR_SDC_CS_STEP_MODE3);
 
 	required_memory = sdc_cfg_set(SDC_DEFAULT_RESOURCE_CFG_TAG,
 									SDC_CFG_TYPE_CS_CFG,

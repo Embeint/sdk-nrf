@@ -10,6 +10,7 @@
 #include <zephyr/logging/log.h>
 
 #include "modules/rai.h"
+#include "modules/dns.h"
 
 LOG_MODULE_DECLARE(lte_lc, CONFIG_LTE_LINK_CONTROL_LOG_LEVEL);
 
@@ -132,20 +133,8 @@ static void on_modem_init(int err, void *ctx)
 	/* Configure Release Assistance Indication (RAI). */
 	rai_set();
 #endif
-}
 
-#if defined(CONFIG_UNITY)
-void lte_lc_on_modem_cfun(int mode, void *ctx)
-#else
-NRF_MODEM_LIB_ON_CFUN(lte_lc_cfun_hook, lte_lc_on_modem_cfun, NULL);
-
-static void lte_lc_on_modem_cfun(int mode, void *ctx)
+#if defined(CONFIG_LTE_LC_DNS_FALLBACK_MODULE)
+	dns_fallback_set();
 #endif
-{
-	ARG_UNUSED(ctx);
-
-	STRUCT_SECTION_FOREACH(lte_lc_cfun_cb, e) {
-		LOG_DBG("CFUN monitor callback: %p", e->callback);
-		e->callback(mode, e->context);
-	}
 }
