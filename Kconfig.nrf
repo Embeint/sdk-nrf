@@ -11,4 +11,8 @@ rsource "lib/Kconfig"
 rsource "modules/Kconfig"
 rsource "subsys/Kconfig"
 
+config NRFX_RESERVED_RESOURCES_HEADER
+	string
+	default "nrfx_config_reserved_resources_ncs.h"
+
 endmenu

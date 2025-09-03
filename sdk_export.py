@@ -69,3 +69,5 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     export(pathlib.Path(args.upstream), pathlib.Path(__file__).parent)
+
+    print("Manually validate NRFX_RESERVED_RESOURCES_HEADER!")
