@@ -549,7 +549,11 @@ int32_t mpsl_clock_ctrl_init(void)
 #endif /* CONFIG_MPSL_EXT_CLK_CTRL_NVM_CLOCK_REQUEST */
 
 #if defined(CONFIG_CLOCK_CONTROL_NRF)
+#if DT_NODE_EXISTS(DT_NODELABEL(hfxo))
+	m_nrf_hfclk_ctrl_data.startup_time_us = z_nrf_clock_bt_ctlr_hf_get_startup_time_us();
+#else
 	m_nrf_hfclk_ctrl_data.startup_time_us = CONFIG_MPSL_HFCLK_LATENCY;
+#endif /* DT_NODE_EXISTS(DT_NODELABEL(hfxo)) */
 #elif defined(CONFIG_CLOCK_CONTROL_NRF2)
 #if DT_NODE_HAS_STATUS(HFCLK_LABEL, okay) && DT_NODE_HAS_COMPAT(HFCLK_LABEL, nordic_nrf54h_hfxo)
 	uint32_t startup_time_us;

@@ -426,7 +426,11 @@ static int32_t mpsl_lib_init_internal(void)
 	}
 
 #if !defined(CONFIG_MPSL_USE_EXTERNAL_CLOCK_CONTROL)
+#if defined(CONFIG_CLOCK_CONTROL_NRF) && DT_NODE_EXISTS(DT_NODELABEL(hfxo))
+	mpsl_clock_hfclk_latency_set(z_nrf_clock_bt_ctlr_hf_get_startup_time_us());
+#else
 	mpsl_clock_hfclk_latency_set(CONFIG_MPSL_HFCLK_LATENCY);
+#endif /* CONFIG_CLOCK_CONTROL_NRF && DT_NODE_EXISTS(DT_NODELABEL(hfxo)) */
 #endif /* !CONFIG_MPSL_USE_EXTERNAL_CLOCK_CONTROL */
 	if (IS_ENABLED(CONFIG_SOC_NRF_FORCE_CONSTLAT) &&
 		!IS_ENABLED(CONFIG_SOC_COMPATIBLE_NRF54LX)) {
