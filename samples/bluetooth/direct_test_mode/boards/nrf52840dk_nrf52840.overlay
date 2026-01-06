@@ -1,0 +1,15 @@
+/* No Direction finding support for now */
+/ {
+	chosen {
+		ncs,dtm-uart = &uart0;
+	};
+};
+
+&uart0 {
+	status = "okay";
+	current-speed = <19200>;
+};
+
+&radio {
+	/delete-property/ dfe-supported;
+};
