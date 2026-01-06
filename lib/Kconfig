@@ -15,5 +15,6 @@ rsource "modem_key_mgmt/Kconfig"
 rsource "multithreading_lock/Kconfig"
 rsource "nrf_modem_lib/Kconfig"
 rsource "pdn/Kconfig"
+rsource "fem_al/Kconfig"
 
 endmenu
