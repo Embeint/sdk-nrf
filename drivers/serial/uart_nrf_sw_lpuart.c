@@ -6,9 +6,11 @@
 
 #include <zephyr/drivers/uart.h>
 #include <zephyr/drivers/gpio.h>
+#include <zephyr/drivers/gpio/gpio_nrf.h>
 #include <hal/nrf_gpio.h>
 #include <hal/nrf_gpiote.h>
 #include <nrfx_gpiote.h>
+#include <gpiote_nrfx.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/onoff.h>
 #include <zephyr/drivers/clock_control/nrf_clock_control.h>
@@ -113,9 +115,13 @@ struct lpuart_config {
 	nrfx_gpiote_pin_t rdy_pin;
 };
 
-static void req_pin_handler(nrfx_gpiote_pin_t pin, nrfx_gpiote_trigger_t trigger, void *context);
+static void req_pin_handler(nrfx_gpiote_pin_t pin,
+			     nrfx_gpiote_trigger_t trigger,
+			     void *context);
 
-static void rdy_pin_handler(nrfx_gpiote_pin_t pin, nrfx_gpiote_trigger_t trigger, void *context);
+static void rdy_pin_handler(nrfx_gpiote_pin_t pin,
+			     nrfx_gpiote_trigger_t trigger,
+			     void *context);
 
 static inline struct lpuart_data *get_dev_data(const struct device *dev)
 {
@@ -128,17 +134,18 @@ static inline const struct lpuart_config *get_dev_config(const struct device *de
 }
 
 #define GPIOTE_NODE(gpio_node) DT_PHANDLE(gpio_node, gpiote_instance)
-#define GPIOTE_INST_AND_COMMA(gpio_node)                                                           \
-	IF_ENABLED(DT_NODE_HAS_PROP(gpio_node, gpiote_instance),                                   \
-		   ([DT_PROP(gpio_node, port)] =                                                   \
-			    NRFX_GPIOTE_INSTANCE(DT_PROP(GPIOTE_NODE(gpio_node), instance)), ))
+#define GPIOTE_INST_AND_COMMA(gpio_node) [DT_PROP(gpio_node, port)] =	  \
+	COND_CODE_1(DT_NODE_HAS_PROP(gpio_node, gpiote_instance),	  \
+		    (&GPIOTE_NRFX_INST_BY_NODE(GPIOTE_NODE(gpio_node))), \
+		    (NULL)),
 
-static const nrfx_gpiote_t *get_gpiote(nrfx_gpiote_pin_t pin)
+static nrfx_gpiote_t *get_gpiote(nrfx_gpiote_pin_t pin)
 {
-	static const nrfx_gpiote_t gpiote[GPIO_COUNT] = {
-		DT_FOREACH_STATUS_OKAY(nordic_nrf_gpio, GPIOTE_INST_AND_COMMA)};
+	static nrfx_gpiote_t * const gpiote_per_port[GPIO_COUNT] = {
+		DT_FOREACH_STATUS_OKAY(nordic_nrf_gpio, GPIOTE_INST_AND_COMMA)
+	};
 
-	return &gpiote[pin >> 5];
+	return gpiote_per_port[NRF_PIN_NUMBER_TO_PORT(pin)];
 }
 
 /* Called when uart transfer is finished to indicate to the receiver that it
@@ -146,8 +153,12 @@ static const nrfx_gpiote_t *get_gpiote(nrfx_gpiote_pin_t pin)
  */
 static void req_pin_idle(struct lpuart_data *data)
 {
-	nrf_gpio_cfg(data->req_pin, NRF_GPIO_PIN_DIR_OUTPUT, NRF_GPIO_PIN_INPUT_DISCONNECT,
-		     NRF_GPIO_PIN_NOPULL, NRF_GPIO_PIN_S0S1, NRF_GPIO_PIN_NOSENSE);
+	nrf_gpio_cfg(data->req_pin,
+		     NRF_GPIO_PIN_DIR_OUTPUT,
+		     NRF_GPIO_PIN_INPUT_DISCONNECT,
+		     NRF_GPIO_PIN_NOPULL,
+		     NRF_GPIO_PIN_S0S1,
+		     NRF_GPIO_PIN_NOSENSE);
 }
 
 static void pend_req_pin_idle(struct lpuart_data *data)
@@ -185,24 +196,30 @@ static void req_pin_arm(struct lpuart_data *data)
 static int req_pin_init(struct lpuart_data *data, nrfx_gpiote_pin_t pin)
 {
 	uint8_t ch;
-	nrfx_err_t err;
+	int err;
 	nrf_gpio_pin_pull_t pull_config = NRF_GPIO_PIN_PULLDOWN;
-	nrfx_gpiote_trigger_config_t trigger_config = {.trigger = NRFX_GPIOTE_TRIGGER_HITOLO,
-						       .p_in_channel = &ch};
-	nrfx_gpiote_handler_config_t handler_config = {.handler = req_pin_handler,
-						       .p_context = data};
-	nrfx_gpiote_input_pin_config_t input_config = {.p_pull_config = &pull_config,
-						       .p_trigger_config = &trigger_config,
-						       .p_handler_config = &handler_config};
+	nrfx_gpiote_trigger_config_t trigger_config = {
+		.trigger = NRFX_GPIOTE_TRIGGER_HITOLO,
+		.p_in_channel = &ch
+	};
+	nrfx_gpiote_handler_config_t handler_config = {
+		.handler = req_pin_handler,
+		.p_context = data
+	};
+	nrfx_gpiote_input_pin_config_t input_config = {
+		.p_pull_config = &pull_config,
+		.p_trigger_config = &trigger_config,
+		.p_handler_config = &handler_config
+	};
 
 	err = nrfx_gpiote_channel_alloc(get_gpiote(pin), &ch);
-	if (err != NRFX_SUCCESS) {
-		return -ENOMEM;
+	if (err < 0) {
+		return err;
 	}
 
 	err = nrfx_gpiote_input_configure(get_gpiote(pin), pin, &input_config);
-	if (err != NRFX_SUCCESS) {
-		return -EINVAL;
+	if (err < 0) {
+		return err;
 	}
 
 	data->req_pin = pin;
@@ -220,25 +237,30 @@ static void rdy_pin_suspend(struct lpuart_data *data)
 	nrfx_gpiote_trigger_disable(get_gpiote(data->rdy_pin), data->rdy_pin);
 }
 
+
 static int rdy_pin_init(struct lpuart_data *data, nrfx_gpiote_pin_t pin)
 {
-	nrfx_err_t err;
+	int err;
 	nrf_gpio_pin_pull_t pull_config = NRF_GPIO_PIN_NOPULL;
-	nrfx_gpiote_handler_config_t handler_config = {.handler = rdy_pin_handler,
-						       .p_context = data};
-	nrfx_gpiote_input_pin_config_t input_config = {.p_pull_config = &pull_config,
-						       .p_trigger_config = NULL,
-						       .p_handler_config = &handler_config};
+	nrfx_gpiote_handler_config_t handler_config = {
+		.handler = rdy_pin_handler,
+		.p_context = data
+	};
+	nrfx_gpiote_input_pin_config_t input_config = {
+		.p_pull_config = &pull_config,
+		.p_trigger_config = NULL,
+		.p_handler_config = &handler_config
+	};
 
 	err = nrfx_gpiote_channel_alloc(get_gpiote(pin), &data->rdy_ch);
-	if (err != NRFX_SUCCESS) {
-		return -ENOMEM;
+	if (err < 0) {
+		return err;
 	}
 
 	err = nrfx_gpiote_input_configure(get_gpiote(pin), pin, &input_config);
-	if (err != NRFX_SUCCESS) {
-		LOG_ERR("err:%08x", err);
-		return -EINVAL;
+	if (err < 0) {
+		LOG_ERR("err: %d", err);
+		return err;
 	}
 
 	data->rdy_pin = pin;
@@ -250,15 +272,19 @@ static int rdy_pin_init(struct lpuart_data *data, nrfx_gpiote_pin_t pin)
 /* Pin activated to detect high state (using SENSE). */
 static void rdy_pin_idle(struct lpuart_data *data)
 {
-	nrfx_err_t err;
-	nrfx_gpiote_trigger_config_t trigger_config = {.trigger = NRFX_GPIOTE_TRIGGER_HIGH};
-	nrfx_gpiote_input_pin_config_t input_config = {.p_pull_config = NULL,
-						       .p_trigger_config = &trigger_config,
-						       .p_handler_config = NULL};
-	const nrfx_gpiote_t *gpiote = get_gpiote(data->rdy_pin);
+	int err;
+	nrfx_gpiote_trigger_config_t trigger_config = {
+		.trigger = NRFX_GPIOTE_TRIGGER_HIGH
+	};
+	nrfx_gpiote_input_pin_config_t input_config = {
+		.p_pull_config = NULL,
+		.p_trigger_config = &trigger_config,
+		.p_handler_config = NULL
+	};
+	nrfx_gpiote_t *gpiote = get_gpiote(data->rdy_pin);
 
 	err = nrfx_gpiote_input_configure(gpiote, data->rdy_pin, &input_config);
-	__ASSERT(err == NRFX_SUCCESS, "Unexpected err: %08x/%d", err, err);
+	__ASSERT(err == 0, "Unexpected err: %d", err);
 
 	nrfx_gpiote_trigger_enable(gpiote, data->rdy_pin, true);
 }
@@ -271,22 +297,26 @@ static void rdy_pin_idle(struct lpuart_data *data)
  */
 static bool rdy_pin_blink(struct lpuart_data *data)
 {
-	nrfx_err_t err;
-	nrfx_gpiote_trigger_config_t trigger_config = {.trigger = NRFX_GPIOTE_TRIGGER_HITOLO,
-						       .p_in_channel = &data->rdy_ch};
-	nrfx_gpiote_input_pin_config_t input_config = {.p_pull_config = NULL,
-						       .p_trigger_config = &trigger_config,
-						       .p_handler_config = NULL};
+	int err;
+	nrfx_gpiote_trigger_config_t trigger_config = {
+		.trigger = NRFX_GPIOTE_TRIGGER_HITOLO,
+		.p_in_channel = &data->rdy_ch
+	};
+	nrfx_gpiote_input_pin_config_t input_config = {
+		.p_pull_config = NULL,
+		.p_trigger_config = &trigger_config,
+		.p_handler_config = NULL
+	};
 	const nrf_gpio_pin_dir_t dir_in = NRF_GPIO_PIN_DIR_INPUT;
 	const nrf_gpio_pin_dir_t dir_out = NRF_GPIO_PIN_DIR_OUTPUT;
-	const nrfx_gpiote_t *gpiote = get_gpiote(data->rdy_pin);
+	nrfx_gpiote_t *gpiote = get_gpiote(data->rdy_pin);
 	bool ret;
 
 	/* Drive low for a moment */
 	nrf_gpio_reconfigure(data->rdy_pin, &dir_out, NULL, NULL, NULL, NULL);
 
 	err = nrfx_gpiote_input_configure(gpiote, data->rdy_pin, &input_config);
-	__ASSERT(err == NRFX_SUCCESS, "Unexpected err: %08x/%d", err, err);
+	__ASSERT(err == 0, "Unexpected err: %d", err);
 
 	nrfx_gpiote_trigger_enable(gpiote, data->rdy_pin, true);
 
@@ -325,7 +355,7 @@ static void deactivate_rx(struct lpuart_data *data)
 
 	if (IS_ENABLED(CONFIG_NRF_SW_LPUART_HFXO_ON_RX)) {
 		struct onoff_manager *mgr =
-			z_nrf_clock_control_get_onoff(CLOCK_CONTROL_NRF_SUBSYS_HF);
+		     z_nrf_clock_control_get_onoff(CLOCK_CONTROL_NRF_SUBSYS_HF);
 
 		err = onoff_cancel_or_release(mgr, &data->rx_clk_cli);
 		__ASSERT_NO_MSG(err >= 0);
@@ -369,10 +399,12 @@ static void activate_rx(struct lpuart_data *data)
 	}
 }
 
-static void rx_hfclk_callback(struct onoff_manager *mgr, struct onoff_client *cli, uint32_t state,
-			      int res)
+static void rx_hfclk_callback(struct onoff_manager *mgr,
+			      struct onoff_client *cli,
+			      uint32_t state, int res)
 {
-	struct lpuart_data *data = CONTAINER_OF(cli, struct lpuart_data, rx_clk_cli);
+	struct lpuart_data *data =
+		CONTAINER_OF(cli, struct lpuart_data, rx_clk_cli);
 
 	__ASSERT_NO_MSG(res >= 0);
 
@@ -381,7 +413,8 @@ static void rx_hfclk_callback(struct onoff_manager *mgr, struct onoff_client *cl
 
 static void rx_hfclk_request(struct lpuart_data *data)
 {
-	struct onoff_manager *mgr = z_nrf_clock_control_get_onoff(CLOCK_CONTROL_NRF_SUBSYS_HF);
+	struct onoff_manager *mgr =
+		z_nrf_clock_control_get_onoff(CLOCK_CONTROL_NRF_SUBSYS_HF);
 	int err;
 
 	sys_notify_init_callback(&data->rx_clk_cli.notify, rx_hfclk_callback);
@@ -417,7 +450,9 @@ static void tx_complete(struct lpuart_data *data)
 /* Handler is called when transition to low state is detected which indicates
  * that receiver is ready for the packet.
  */
-static void req_pin_handler(nrfx_gpiote_pin_t pin, nrfx_gpiote_trigger_t trigger, void *context)
+static void req_pin_handler(nrfx_gpiote_pin_t pin,
+			     nrfx_gpiote_trigger_t trigger,
+			     void *context)
 {
 	ARG_UNUSED(trigger);
 	ARG_UNUSED(pin);
@@ -456,7 +491,9 @@ static void req_pin_handler(nrfx_gpiote_pin_t pin, nrfx_gpiote_trigger_t trigger
  * - low state. Receiver is active and receiving a packet. Transmitter indicates
  *   end of the packet.
  */
-static void rdy_pin_handler(nrfx_gpiote_pin_t pin, nrfx_gpiote_trigger_t trigger, void *context)
+static void rdy_pin_handler(nrfx_gpiote_pin_t pin,
+			    nrfx_gpiote_trigger_t trigger,
+			    void *context)
 {
 	struct lpuart_data *data = context;
 
@@ -481,7 +518,8 @@ static void rdy_pin_handler(nrfx_gpiote_pin_t pin, nrfx_gpiote_trigger_t trigger
 	}
 }
 
-static int api_callback_set(const struct device *dev, uart_callback_t callback, void *user_data)
+static int api_callback_set(const struct device *dev, uart_callback_t callback,
+			    void *user_data)
 {
 	struct lpuart_data *data = get_dev_data(dev);
 
@@ -500,13 +538,15 @@ static void user_callback(const struct device *dev, struct uart_event *evt)
 	}
 }
 
-static void uart_callback(const struct device *uart, struct uart_event *evt, void *user_data)
+static void uart_callback(const struct device *uart, struct uart_event *evt,
+			  void *user_data)
 {
 	struct device *dev = user_data;
 	struct lpuart_data *data = get_dev_data(dev);
 
 	switch (evt->type) {
-	case UART_TX_DONE: {
+	case UART_TX_DONE:
+	{
 		const uint8_t *txbuf = evt->data.tx.buf;
 
 		tx_complete(data);
@@ -524,8 +564,8 @@ static void uart_callback(const struct device *uart, struct uart_event *evt, voi
 		break;
 
 	case UART_RX_RDY:
-		LOG_DBG("RX: Ready buf:%p, offset: %d,len: %d", (void *)evt->data.rx.buf,
-			evt->data.rx.offset, evt->data.rx.len);
+		LOG_DBG("RX: Ready buf:%p, offset: %d,len: %d",
+		     (void *)evt->data.rx.buf, evt->data.rx.offset, evt->data.rx.len);
 		data->rx_got_data = true;
 		user_callback(dev, evt);
 		break;
@@ -547,7 +587,8 @@ static void uart_callback(const struct device *uart, struct uart_event *evt, voi
 		user_callback(dev, evt);
 		break;
 
-	case UART_RX_DISABLED: {
+	case UART_RX_DISABLED:
+	{
 		bool call_cb;
 
 		LOG_DBG("Rx disabled %d", data->rx_state);
@@ -573,7 +614,12 @@ static void uart_callback(const struct device *uart, struct uart_event *evt, voi
 				 */
 				struct uart_event buf_rel_evt = {
 					.type = UART_RX_BUF_RELEASED,
-					.data = {.rx_buf = {.buf = data->rx_buf}}};
+					.data = {
+						.rx_buf = {
+							.buf = data->rx_buf
+						}
+					}
+				};
 
 				LOG_DBG("RX: Rx buf released %p", (void *)data->rx_buf);
 				user_callback(dev, &buf_rel_evt);
@@ -619,14 +665,22 @@ static void tx_timeout(struct k_timer *timer)
 	if (txbuf == (void *)&data->txbyte) {
 		data->txbyte = -1;
 	} else {
-		struct uart_event evt = {.type = UART_TX_ABORTED,
-					 .data = {.tx = {.buf = txbuf, .len = 0}}};
+		struct uart_event evt = {
+			.type = UART_TX_ABORTED,
+			.data = {
+				.tx = {
+					.buf = txbuf,
+					.len = 0
+				}
+			}
+		};
 
 		user_callback(dev, &evt);
 	}
 }
 
-static int api_tx(const struct device *dev, const uint8_t *buf, size_t len, int32_t timeout)
+static int api_tx(const struct device *dev, const uint8_t *buf,
+		  size_t len, int32_t timeout)
 {
 	struct lpuart_data *data = get_dev_data(dev);
 
@@ -636,7 +690,8 @@ static int api_tx(const struct device *dev, const uint8_t *buf, size_t len, int3
 
 	LOG_DBG("tx len:%d", len);
 	data->tx_len = len;
-	k_timer_start(&data->tx_timer, timeout == SYS_FOREVER_US ? K_FOREVER : K_USEC(timeout),
+	k_timer_start(&data->tx_timer,
+		      timeout == SYS_FOREVER_US ? K_FOREVER : K_USEC(timeout),
 		      K_NO_WAIT);
 
 	/* Enable interrupt on pin going low. */
@@ -672,14 +727,23 @@ static int api_tx_abort(const struct device *dev)
 		return err;
 	}
 
-	struct uart_event event = {.type = UART_TX_ABORTED, .data = {.tx = {.buf = buf, .len = 0}}};
+	struct uart_event event = {
+		.type = UART_TX_ABORTED,
+		.data = {
+			.tx = {
+				.buf = buf,
+				.len = 0
+			}
+		}
+	};
 
 	user_callback(dev, &event);
 
 	return err;
 }
 
-static int api_rx_enable(const struct device *dev, uint8_t *buf, size_t len, int32_t timeout)
+static int api_rx_enable(const struct device *dev, uint8_t *buf,
+			 size_t len, int32_t timeout)
 {
 	ARG_UNUSED(timeout);
 	struct lpuart_data *data = get_dev_data(dev);
@@ -703,7 +767,8 @@ static int api_rx_buf_rsp(const struct device *dev, uint8_t *buf, size_t len)
 {
 	struct lpuart_data *data = get_dev_data(dev);
 
-	__ASSERT_NO_MSG((data->rx_state != RX_OFF) && (data->rx_state != RX_TO_OFF));
+	__ASSERT_NO_MSG((data->rx_state != RX_OFF) &&
+		 (data->rx_state != RX_TO_OFF));
 
 	LOG_DBG("buf rsp buf:%p len:%d, state:%d", (void *)buf, len, data->rx_state);
 	if (data->rx_state == RX_TO_IDLE || data->rx_state == RX_BLOCKED) {
@@ -731,8 +796,14 @@ static int api_rx_disable(const struct device *dev)
 	data->rx_state = RX_TO_OFF;
 
 	if (data->rx_buf) {
-		struct uart_event buf_rel_evt = {.type = UART_RX_BUF_RELEASED,
-						 .data = {.rx_buf = {.buf = data->rx_buf}}};
+		struct uart_event buf_rel_evt = {
+			.type = UART_RX_BUF_RELEASED,
+			.data = {
+				.rx_buf = {
+					.buf = data->rx_buf
+				}
+			}
+		};
 
 		data->rx_buf = NULL;
 		user_callback(dev, &buf_rel_evt);
@@ -741,7 +812,9 @@ static int api_rx_disable(const struct device *dev)
 	err = uart_rx_disable(data->uart);
 	if (err == -EFAULT) {
 
-		struct uart_event event = {.type = UART_RX_DISABLED};
+		struct uart_event event = {
+			.type = UART_RX_DISABLED
+		};
 
 		data->rx_state = RX_OFF;
 		user_callback(dev, &event);
@@ -757,13 +830,15 @@ static uint32_t int_driven_rd_available(struct lpuart_data *data)
 	return data->int_driven.rxlen - data->int_driven.rxrd;
 }
 
-static void int_driven_rx_feed(const struct device *dev, struct lpuart_data *data)
+static void int_driven_rx_feed(const struct device *dev,
+			       struct lpuart_data *data)
 {
 	int err;
 
 	data->int_driven.rxlen = 0;
 	data->int_driven.rxrd = 0;
-	err = api_rx_buf_rsp(dev, data->int_driven.rxbuf, sizeof(data->int_driven.rxbuf));
+	err = api_rx_buf_rsp(dev, data->int_driven.rxbuf,
+			     sizeof(data->int_driven.rxbuf));
 	__ASSERT_NO_MSG(err >= 0);
 }
 
@@ -785,13 +860,16 @@ static void trampoline_timeout(struct k_timer *timer)
 	}
 }
 
-static void int_driven_evt_handler(const struct device *lpuart, struct uart_event *evt,
+static void int_driven_evt_handler(const struct device *lpuart,
+				   struct uart_event *evt,
 				   void *user_data)
 {
 	struct lpuart_data *data = get_dev_data(lpuart);
 	bool call_handler = false;
 
 	switch (evt->type) {
+	case UART_TX_ABORTED:
+		/* fallthrough */
 	case UART_TX_DONE:
 		data->int_driven.txlen = 0;
 		call_handler = true;
@@ -809,13 +887,14 @@ static void int_driven_evt_handler(const struct device *lpuart, struct uart_even
 	case UART_RX_STOPPED:
 		call_handler = data->int_driven.err_enabled;
 		break;
-	case UART_RX_DISABLED: {
+	case UART_RX_DISABLED:
+	{
 		int err;
 
 		data->int_driven.rxlen = 0;
 		data->int_driven.rxrd = 0;
-		err = api_rx_enable(lpuart, data->int_driven.rxbuf, sizeof(data->int_driven.rxbuf),
-				    1000);
+		err = api_rx_enable(lpuart, data->int_driven.rxbuf,
+					sizeof(data->int_driven.rxbuf), 1000);
 		__ASSERT_NO_MSG(err >= 0);
 		break;
 	}
@@ -828,7 +907,9 @@ static void int_driven_evt_handler(const struct device *lpuart, struct uart_even
 	}
 }
 
-static int api_fifo_read(const struct device *dev, uint8_t *rx_data, const int size)
+static int api_fifo_read(const struct device *dev,
+			 uint8_t *rx_data,
+			 const int size)
 {
 	struct lpuart_data *data = get_dev_data(dev);
 	uint32_t available = int_driven_rd_available(data);
@@ -836,14 +917,18 @@ static int api_fifo_read(const struct device *dev, uint8_t *rx_data, const int s
 
 	if (available) {
 		cpylen = MIN(available, size);
-		memcpy(rx_data, &data->int_driven.rxbuf[data->int_driven.rxrd], cpylen);
+		memcpy(rx_data,
+		       &data->int_driven.rxbuf[data->int_driven.rxrd],
+		       cpylen);
 		data->int_driven.rxrd += cpylen;
 	}
 
 	return cpylen;
 }
 
-static int api_fifo_fill(const struct device *dev, const uint8_t *tx_data, int size)
+static int api_fifo_fill(const struct device *dev,
+			 const uint8_t *tx_data,
+			 int size)
 {
 	struct lpuart_data *data = get_dev_data(dev);
 	int err;
@@ -855,7 +940,8 @@ static int api_fifo_fill(const struct device *dev, const uint8_t *tx_data, int s
 
 	memcpy(data->int_driven.txbuf, tx_data, size);
 
-	err = api_tx(dev, data->int_driven.txbuf, data->int_driven.txlen,
+	err = api_tx(dev, data->int_driven.txbuf,
+		     data->int_driven.txlen,
 		     CONFIG_NRF_SW_LPUART_DEFAULT_TX_TIMEOUT);
 	if (err < 0) {
 		data->int_driven.txlen = 0;
@@ -891,7 +977,8 @@ static int api_irq_tx_ready(const struct device *dev)
 	return data->int_driven.tx_enabled && (data->tx_buf == NULL);
 }
 
-static void api_irq_callback_set(const struct device *dev, uart_irq_callback_user_data_t cb,
+static void api_irq_callback_set(const struct device *dev,
+				 uart_irq_callback_user_data_t cb,
 				 void *user_data)
 {
 	struct lpuart_data *data = get_dev_data(dev);
@@ -922,7 +1009,8 @@ static int api_irq_rx_ready(const struct device *dev)
 {
 	struct lpuart_data *data = get_dev_data(dev);
 
-	return data->int_driven.rx_enabled && int_driven_rd_available(get_dev_data(dev));
+	return data->int_driven.rx_enabled &&
+		int_driven_rd_available(get_dev_data(dev));
 }
 
 static int api_irq_tx_complete(const struct device *dev)
@@ -996,7 +1084,8 @@ static int lpuart_init(const struct device *dev)
 		return -EINVAL;
 	}
 
-	err = api_rx_enable(dev, data->int_driven.rxbuf, sizeof(data->int_driven.rxbuf), 1000);
+	err = api_rx_enable(dev, data->int_driven.rxbuf,
+				sizeof(data->int_driven.rxbuf), 1000);
 #endif
 
 	data->txbyte = -1;
@@ -1032,7 +1121,8 @@ static void api_poll_out(const struct device *dev, unsigned char out_char)
 		return;
 	}
 
-	err = api_tx(dev, (uint8_t *)&data->txbyte, 1, CONFIG_NRF_SW_LPUART_DEFAULT_TX_TIMEOUT);
+	err = api_tx(dev, (uint8_t *)&data->txbyte, 1,
+		     CONFIG_NRF_SW_LPUART_DEFAULT_TX_TIMEOUT);
 	if (err < 0) {
 		data->txbyte = -1;
 	}
@@ -1058,60 +1148,67 @@ static int api_config_get(const struct device *dev, struct uart_config *cfg)
 }
 #endif /* CONFIG_UART_USE_RUNTIME_CONFIGURE */
 
-#define LPUART_PIN_CFG_INITIALIZER(pin_prop) {.pin = DT_INST_PROP(0, pin_prop)}
+#define LPUART_PIN_CFG_INITIALIZER(pin_prop) \
+	{ \
+		.pin = DT_INST_PROP(0, pin_prop) \
+	}
 
-static const struct lpuart_config lpuart_config = {.req_pin = DT_INST_PROP(0, req_pin),
-						   .rdy_pin = DT_INST_PROP(0, rdy_pin)};
+static const struct lpuart_config lpuart_config = {
+	.req_pin = DT_INST_PROP(0, req_pin),
+	.rdy_pin = DT_INST_PROP(0, rdy_pin)
+};
 
 static struct lpuart_data lpuart_data;
 
-static const struct uart_driver_api lpuart_api = {.callback_set = api_callback_set,
-						  .tx = api_tx,
-						  .tx_abort = api_tx_abort,
-						  .rx_enable = api_rx_enable,
-						  .rx_buf_rsp = api_rx_buf_rsp,
-						  .rx_disable = api_rx_disable,
-						  .poll_in = api_poll_in,
-						  .poll_out = api_poll_out,
+static const struct uart_driver_api lpuart_api = {
+	.callback_set = api_callback_set,
+	.tx = api_tx,
+	.tx_abort = api_tx_abort,
+	.rx_enable = api_rx_enable,
+	.rx_buf_rsp = api_rx_buf_rsp,
+	.rx_disable = api_rx_disable,
+	.poll_in = api_poll_in,
+	.poll_out = api_poll_out,
 #ifdef CONFIG_UART_USE_RUNTIME_CONFIGURE
-						  .configure = api_configure,
-						  .config_get = api_config_get,
+	.configure = api_configure,
+	.config_get = api_config_get,
 #endif
 #if CONFIG_NRF_SW_LPUART_INT_DRIVEN
-						  .fifo_fill = api_fifo_fill,
-						  .fifo_read = api_fifo_read,
-						  .irq_tx_enable = api_irq_tx_enable,
-						  .irq_tx_disable = api_irq_tx_disable,
-						  .irq_tx_ready = api_irq_tx_ready,
-						  .irq_rx_enable = api_irq_rx_enable,
-						  .irq_rx_disable = api_irq_rx_disable,
-						  .irq_tx_complete = api_irq_tx_complete,
-						  .irq_rx_ready = api_irq_rx_ready,
-						  .irq_err_enable = api_irq_err_enable,
-						  .irq_err_disable = api_irq_err_disable,
-						  .irq_is_pending = api_irq_is_pending,
-						  .irq_update = api_irq_update,
-						  .irq_callback_set = api_irq_callback_set
+	.fifo_fill = api_fifo_fill,
+	.fifo_read = api_fifo_read,
+	.irq_tx_enable = api_irq_tx_enable,
+	.irq_tx_disable = api_irq_tx_disable,
+	.irq_tx_ready = api_irq_tx_ready,
+	.irq_rx_enable = api_irq_rx_enable,
+	.irq_rx_disable = api_irq_rx_disable,
+	.irq_tx_complete = api_irq_tx_complete,
+	.irq_rx_ready = api_irq_rx_ready,
+	.irq_err_enable = api_irq_err_enable,
+	.irq_err_disable = api_irq_err_disable,
+	.irq_is_pending = api_irq_is_pending,
+	.irq_update = api_irq_update,
+	.irq_callback_set = api_irq_callback_set
 #endif
 };
 
-#define GPIO_HAS_PIN(gpio_node, pin_prop)                                                          \
+#define GPIO_HAS_PIN(gpio_node, pin_prop)				  \
 	(DT_PROP(gpio_node, port) == (DT_INST_PROP(0, pin_prop) >> 5))
 
 /* There may be GPIO ports which cannot be used with GPIOTE. Check if pins are
  * not from those ports.
  */
-#define CHECK_GPIOTE_AVAILABLE(gpio_node)                                                          \
-	BUILD_ASSERT((!GPIO_HAS_PIN(gpio_node, req_pin) && !GPIO_HAS_PIN(gpio_node, rdy_pin)) ||   \
+#define CHECK_GPIOTE_AVAILABLE(gpio_node) \
+	BUILD_ASSERT((!GPIO_HAS_PIN(gpio_node, req_pin) &&		  \
+		      !GPIO_HAS_PIN(gpio_node, rdy_pin)) ||		  \
 		     DT_NODE_HAS_PROP(gpio_node, gpiote_instance));
 
-#define CHECK_GPIOTE_IRQ_PRIORITY(gpio_node)                                                       \
-	IF_ENABLED(DT_NODE_HAS_PROP(gpio_node, gpiote_instance),                                   \
-		   (BUILD_ASSERT((!GPIO_HAS_PIN(gpio_node, req_pin) &&                             \
-				  !GPIO_HAS_PIN(gpio_node, rdy_pin)) ||                            \
-					 DT_IRQ(DT_PARENT(DT_NODELABEL(lpuart)), priority) ==      \
-						 DT_IRQ(GPIOTE_NODE(gpio_node), priority),         \
-				 "UARTE and GPIOTE interrupt priority must match.");))
+#define CHECK_GPIOTE_IRQ_PRIORITY(gpio_node)				  \
+	IF_ENABLED(DT_NODE_HAS_PROP(gpio_node, gpiote_instance), (	  \
+	BUILD_ASSERT((!GPIO_HAS_PIN(gpio_node, req_pin) &&		  \
+		      !GPIO_HAS_PIN(gpio_node, rdy_pin)) ||		  \
+		     DT_IRQ(DT_PARENT(DT_NODELABEL(lpuart)), priority) == \
+		     DT_IRQ(GPIOTE_NODE(gpio_node), priority),		  \
+		     "UARTE and GPIOTE interrupt priority must match.");))
 
 #if CONFIG_NRF_SW_LPUART_INT_DRIVEN
 /* UARTE interrupt priority must be the same as system timer priority. */
@@ -1127,5 +1224,7 @@ BUILD_ASSERT(DT_IRQ(DT_PARENT(DT_NODELABEL(lpuart)), priority) ==
 DT_FOREACH_STATUS_OKAY(nordic_nrf_gpio, CHECK_GPIOTE_IRQ_PRIORITY)
 DT_FOREACH_STATUS_OKAY(nordic_nrf_gpio, CHECK_GPIOTE_AVAILABLE)
 
-DEVICE_DT_DEFINE(DT_NODELABEL(lpuart), lpuart_init, NULL, &lpuart_data, &lpuart_config, POST_KERNEL,
-		 CONFIG_NRF_SW_LPUART_INIT_PRIORITY, &lpuart_api);
+DEVICE_DT_DEFINE(DT_NODELABEL(lpuart), lpuart_init, NULL,
+	      &lpuart_data, &lpuart_config,
+	      POST_KERNEL, CONFIG_NRF_SW_LPUART_INIT_PRIORITY,
+	      &lpuart_api);

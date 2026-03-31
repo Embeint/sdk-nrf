@@ -10,9 +10,9 @@ manifest:
       remote: ncs
       repo-path: sdk-nrfxlib
       path: modules/nrfconnect/nrfxlib
-      revision: v3.1.0
+      revision: af7c4d583d6fa8cf5bcb66564376786dc99cde74
     - name: oberon-psa-crypto
       remote: ncs
       path: modules/crypto/oberon-psa-crypto
       repo-path: sdk-oberon-psa-crypto
-      revision: ncs-v3.1.0
+      revision: fd1f2aa156d8beb78584dfbaf30df30bf8f6568f

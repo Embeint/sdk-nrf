@@ -206,7 +206,8 @@ static void parse_cgev(const char *notif)
 		}
 
 		SYS_SLIST_FOR_EACH_CONTAINER(&pdn_contexts, pdn, node) {
-			if (pdn->callback && (pdn->context_id == cid || cid == CID_UNASSIGNED)) {
+			if (pdn->callback &&
+			    (pdn->context_id == cid || map[i].event == PDN_EVENT_NETWORK_DETACH)) {
 				pdn->callback(pdn->context_id, map[i].event, 0);
 			}
 		}
@@ -240,8 +241,8 @@ static void parse_cgev_apn_rate_ctrl(const char *notif)
 	SYS_SLIST_FOR_EACH_CONTAINER(&pdn_contexts, pdn, node) {
 		if (pdn->callback && pdn->context_id == cid) {
 			pdn->callback(pdn->context_id,
-				      apn_rate_ctrl_status ? PDN_EVENT_APN_RATE_CONTROL_ON
-							   : PDN_EVENT_APN_RATE_CONTROL_OFF,
+				      apn_rate_ctrl_status == 1 ? PDN_EVENT_APN_RATE_CONTROL_ON
+								: PDN_EVENT_APN_RATE_CONTROL_OFF,
 				      0);
 		}
 	}
@@ -632,51 +633,6 @@ int pdn_id_get(uint8_t cid)
 	}
 
 	return strtoul(p + 1, NULL, 10);
-}
-
-int pdn_dynamic_params_get(uint8_t cid, struct in_addr *dns4_pri,
-			   struct in_addr *dns4_sec, unsigned int *ipv4_mtu)
-{
-	int matched;
-	const char *fmt;
-	unsigned int mtu;
-	char dns4_pri_str[INET_ADDRSTRLEN];
-	char dns4_sec_str[INET_ADDRSTRLEN];
-	char at_cmd[sizeof("AT+CGCONTRDP=###")];
-
-	if (snprintf(at_cmd, sizeof(at_cmd), AT_CMD_PDN_CONTEXT_READ_INFO, cid) >= sizeof(at_cmd)) {
-		return -E2BIG;
-	}
-
-	fmt = AT_CMD_PDN_CONTEXT_READ_INFO_PARSE_LINE1;
-
-	/* If IPv4 is enabled, it will be the first response line. */
-	matched = nrf_modem_at_scanf(at_cmd, fmt, &dns4_pri_str, &dns4_sec_str, &mtu);
-	/* Need to match at least the two IP addresses, or there is an error */
-	if (matched < 2) {
-		return -EBADMSG;
-	}
-
-	if (dns4_pri) {
-		if (zsock_inet_pton(AF_INET, dns4_pri_str, dns4_pri) != 1) {
-			return -EADDRNOTAVAIL;
-		}
-	}
-	if (dns4_sec) {
-		if (zsock_inet_pton(AF_INET, dns4_sec_str, dns4_sec) != 1) {
-			return -EADDRNOTAVAIL;
-		}
-	}
-	if (ipv4_mtu) {
-		/* If we matched the MTU, copy it here, otherwise report zero */
-		if (matched == 3) {
-			*ipv4_mtu = mtu;
-		} else {
-			*ipv4_mtu = 0;
-		}
-	}
-
-	return 0;
 }
 
 static int pdn_sa_family_from_ip_string(const char *src)

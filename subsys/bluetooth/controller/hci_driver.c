@@ -19,7 +19,6 @@
 #include <stdbool.h>
 #include <zephyr/sys/__assert.h>
 
-#define SDC_USE_NEW_MEM_API
 #include <sdc.h>
 #include <sdc_soc.h>
 #include <sdc_hci.h>
@@ -198,6 +197,28 @@ BUILD_ASSERT(!IS_ENABLED(CONFIG_BT_PERIPHERAL) ||
 #define SDC_SYNC_TRANSFER_MEM_SIZE 0
 #endif
 
+#if defined(CONFIG_BT_CTLR_FRAME_SPACE_UPDATE)
+#define SDC_FRAME_SPACE_UPDATE_MEM_SIZE \
+	SDC_MEM_FRAME_SPACE_UPDATE(SDC_CENTRAL_COUNT + PERIPHERAL_COUNT)
+#else
+#define SDC_FRAME_SPACE_UPDATE_MEM_SIZE 0
+#endif
+
+#if defined(CONFIG_BT_CTLR_SHORTER_CONNECTION_INTERVALS)
+#define SDC_SHORTER_CONNECTION_INTERVALS_MEM_SIZE                                                  \
+	SDC_MEM_SHORTER_CONNECTION_INTERVALS(SDC_CENTRAL_COUNT + PERIPHERAL_COUNT)
+#else
+#define SDC_SHORTER_CONNECTION_INTERVALS_MEM_SIZE 0
+#endif
+
+#if defined(CONFIG_BT_CTLR_EXTENDED_FEAT_SET)
+#define SDC_EXTENDED_FEAT_SET_MEM_SIZE                                                             \
+	SDC_MEM_EXTENDED_FEATURE_SET(SDC_CENTRAL_COUNT + PERIPHERAL_COUNT,                         \
+				     CONFIG_BT_CTLR_SDC_EXTENDED_FEAT_MAX_REMOTE_PAGE)
+#else
+#define SDC_EXTENDED_FEAT_SET_MEM_SIZE 0
+#endif
+
 #if defined(CONFIG_BT_CTLR_CONN_ISO)
 #define SDC_MEM_CIG SDC_MEM_PER_CIG(CONFIG_BT_CTLR_CONN_ISO_GROUPS)
 #define SDC_MEM_CIS \
@@ -278,6 +299,9 @@ BUILD_ASSERT(!IS_ENABLED(CONFIG_BT_PERIPHERAL) ||
 		      (SDC_LE_POWER_CONTROL_MEM_SIZE) + \
 		      (SDC_SUBRATING_MEM_SIZE) + \
 		      (SDC_SYNC_TRANSFER_MEM_SIZE) + \
+		      (SDC_FRAME_SPACE_UPDATE_MEM_SIZE) + \
+		      (SDC_SHORTER_CONNECTION_INTERVALS_MEM_SIZE) + \
+		      (SDC_EXTENDED_FEAT_SET_MEM_SIZE) + \
 		      (SDC_PERIODIC_ADV_MEM_SIZE) + \
 		      (SDC_PERIODIC_ADV_RSP_MEM_SIZE) + \
 		      (SDC_PERIODIC_SYNC_MEM_SIZE) + \
@@ -311,16 +335,23 @@ void sdc_assertion_handler(const char *const file, const uint32_t line)
 #else /* !IS_ENABLED(CONFIG_BT_CTLR_ASSERT_HANDLER) */
 void sdc_assertion_handler(const char *const file, const uint32_t line)
 {
+	volatile char assert_file_id[11] = { 0 };
+	volatile uint32_t assert_line = line;
+
+	strncpy((char *)assert_file_id, file, sizeof(assert_file_id) - 1);
+
 #if defined(CONFIG_ASSERT) && defined(CONFIG_ASSERT_VERBOSE) && !defined(CONFIG_ASSERT_NO_MSG_INFO)
-	__ASSERT(false, "SoftDevice Controller ASSERT: %s, %d\n", file, line);
+	__ASSERT(false, "SoftDevice Controller ASSERT: %s, %d\n",
+		(char *)assert_file_id, assert_line);
 #elif defined(CONFIG_LOG)
-	LOG_ERR("SoftDevice Controller ASSERT: %s, %d", file, line);
+	LOG_ERR("SoftDevice Controller ASSERT: %s, %d", (char *)assert_file_id, assert_line);
 	k_oops();
 #elif defined(CONFIG_PRINTK)
-	printk("SoftDevice Controller ASSERT: %s, %d\n", file, line);
+	printk("SoftDevice Controller ASSERT: %s, %d\n", (char *)assert_file_id, assert_line);
 	printk("\n");
 	k_oops();
 #else
+	(void)assert_line;
 	k_oops();
 #endif
 }
@@ -470,7 +501,7 @@ static int data_packet_process(const struct device *dev, uint8_t *hci_buf)
 	bc = bt_acl_flags_bc(flags);
 
 	if (len + sizeof(*hdr) > HCI_RX_BUF_SIZE) {
-		LOG_ERR("Event buffer too small. %u > %u",
+		LOG_ERR("Event buffer too small. %zu > %u",
 			len + sizeof(*hdr),
 			HCI_RX_BUF_SIZE);
 		return -ENOMEM;
@@ -501,7 +532,7 @@ static int iso_data_packet_process(const struct device *dev, uint8_t *hci_buf)
 	}
 
 	if (len + sizeof(*hdr) > HCI_RX_BUF_SIZE) {
-		LOG_ERR("Event buffer too small. %u > %u",
+		LOG_ERR("Event buffer too small. %zu > %u",
 			len + sizeof(*hdr),
 			HCI_RX_BUF_SIZE);
 		return -ENOMEM;
@@ -547,10 +578,14 @@ static bool event_packet_is_discardable(const uint8_t *hci_buf)
 		uint8_t subevent = hci_buf[2];
 
 		switch (subevent) {
+#ifdef CONFIG_BT_CTLR_SDC_QOS_CONN_EVENT_REPORT
 		case SDC_HCI_SUBEVENT_VS_QOS_CONN_EVENT_REPORT:
 			return true;
+#endif /* CONFIG_BT_CTLR_SDC_QOS_CONN_EVENT_REPORT */
+#ifdef CONFIG_BT_CTLR_SDC_CONN_ANCHOR_POINT_REPORT
 		case SDC_HCI_SUBEVENT_VS_CONN_ANCHOR_POINT_UPDATE_REPORT:
 			return true;
+#endif /* CONFIG_BT_CTLR_SDC_CONN_ANCHOR_POINT_REPORT */
 		default:
 			return false;
 		}
@@ -567,7 +602,7 @@ static int event_packet_process(const struct device *dev, uint8_t *hci_buf)
 	struct net_buf *evt_buf;
 
 	if (hdr->len + sizeof(*hdr) > HCI_RX_BUF_SIZE) {
-		LOG_ERR("Event buffer too small. %u > %u",
+		LOG_ERR("Event buffer too small. %zu > %u",
 			hdr->len + sizeof(*hdr),
 			HCI_RX_BUF_SIZE);
 		return -ENOMEM;
@@ -694,341 +729,241 @@ static void rand_prio_low_vector_get_blocking(uint8_t *p_buff, uint8_t length)
 	(void) err;
 }
 
-static int configure_supported_features(void)
+static void configure_supported_features(void)
 {
-	int err;
-
 #if defined(CONFIG_BT_BROADCASTER)
 	if (IS_ENABLED(CONFIG_BT_CTLR_ADV_EXT)) {
-		err = sdc_support_ext_adv();
-		if (err) {
-			return -ENOTSUP;
-		}
+		sdc_support_ext_adv();
 	} else {
-		err = sdc_support_adv();
-		if (err) {
-			return -ENOTSUP;
-		}
+		sdc_support_adv();
 	}
 #endif
 
 	if (IS_ENABLED(CONFIG_BT_PER_ADV)) {
-		err = sdc_support_le_periodic_adv();
-		if (err) {
-			return -ENOTSUP;
-		}
+		sdc_support_le_periodic_adv();
 	}
 
 	if (IS_ENABLED(CONFIG_BT_PERIPHERAL)) {
-		err = sdc_support_peripheral();
-		if (err) {
-			return -ENOTSUP;
-		}
+		sdc_support_peripheral();
 	}
 
 	if (IS_ENABLED(CONFIG_BT_OBSERVER)) {
 		if (!IS_ENABLED(CONFIG_BT_CENTRAL)) {
 			if (IS_ENABLED(CONFIG_BT_CTLR_ADV_EXT)) {
-				err = sdc_support_ext_scan();
-				if (err) {
-					return -ENOTSUP;
-				}
+				sdc_support_ext_scan();
 			} else {
-				err = sdc_support_scan();
-				if (err) {
-					return -ENOTSUP;
-				}
+				sdc_support_scan();
 			}
 		}
 
 		if (IS_ENABLED(CONFIG_BT_PER_ADV_SYNC)) {
-			err = sdc_support_le_periodic_sync();
-			if (err) {
-				return -ENOTSUP;
-			}
+			sdc_support_le_periodic_sync();
 		}
 	}
 
 	if (IS_ENABLED(CONFIG_BT_CENTRAL)) {
 		if (IS_ENABLED(CONFIG_BT_CTLR_ADV_EXT)) {
-			err = sdc_support_ext_central();
-			if (err) {
-				return -ENOTSUP;
-			}
+			sdc_support_ext_central();
 		} else {
-			err = sdc_support_central();
-			if (err) {
-				return -ENOTSUP;
-			}
+			sdc_support_central();
 		}
 	}
 
 	if (IS_ENABLED(CONFIG_BT_CTLR_DATA_LENGTH)) {
 		if (IS_ENABLED(CONFIG_BT_CENTRAL)) {
-			err = sdc_support_dle_central();
-			if (err) {
-				return -ENOTSUP;
-			}
+			sdc_support_dle_central();
 		}
 		if (IS_ENABLED(CONFIG_BT_PERIPHERAL)) {
-			err = sdc_support_dle_peripheral();
-			if (err) {
-				return -ENOTSUP;
-			}
+			sdc_support_dle_peripheral();
 		}
 	}
 
 	if (IS_ENABLED(CONFIG_BT_CTLR_PHY_2M)) {
-		err = sdc_support_le_2m_phy();
-		if (err) {
-			return -ENOTSUP;
-		}
+		sdc_support_le_2m_phy();
 		if (IS_ENABLED(CONFIG_BT_CENTRAL)) {
-			err = sdc_support_phy_update_central();
-			if (err) {
-				return -ENOTSUP;
-			}
+			sdc_support_phy_update_central();
 		}
 		if (IS_ENABLED(CONFIG_BT_PERIPHERAL)) {
-			err = sdc_support_phy_update_peripheral();
-			if (err) {
-				return -ENOTSUP;
-			}
+			sdc_support_phy_update_peripheral();
 		}
 	}
 
 	if (IS_ENABLED(CONFIG_BT_CTLR_SYNC_TRANSFER_SENDER)) {
 		if (IS_ENABLED(CONFIG_BT_CENTRAL)) {
-			err = sdc_support_periodic_adv_sync_transfer_sender_central();
-			if (err) {
-				return -ENOTSUP;
-			}
+			sdc_support_periodic_adv_sync_transfer_sender_central();
 		}
 
 		if (IS_ENABLED(CONFIG_BT_PERIPHERAL)) {
-			err = sdc_support_periodic_adv_sync_transfer_sender_peripheral();
-			if (err) {
-				return -ENOTSUP;
-			}
+			sdc_support_periodic_adv_sync_transfer_sender_peripheral();
 		}
 	}
 
 	if (IS_ENABLED(CONFIG_BT_CTLR_SYNC_TRANSFER_RECEIVER)) {
 		if (IS_ENABLED(CONFIG_BT_CENTRAL)) {
-			err = sdc_support_periodic_adv_sync_transfer_receiver_central();
-			if (err) {
-				return -ENOTSUP;
-			}
+			sdc_support_periodic_adv_sync_transfer_receiver_central();
 		}
 
 		if (IS_ENABLED(CONFIG_BT_PERIPHERAL)) {
-			err = sdc_support_periodic_adv_sync_transfer_receiver_peripheral();
-			if (err) {
-				return -ENOTSUP;
-			}
+			sdc_support_periodic_adv_sync_transfer_receiver_peripheral();
 		}
 	}
 
 	if (IS_ENABLED(CONFIG_BT_CTLR_PHY_CODED)) {
-		err = sdc_support_le_coded_phy();
-		if (err) {
-			return -ENOTSUP;
-		}
+		sdc_support_le_coded_phy();
 		if (IS_ENABLED(CONFIG_BT_CENTRAL)) {
-			err = sdc_support_phy_update_central();
-			if (err) {
-				return -ENOTSUP;
-			}
+			sdc_support_phy_update_central();
 		}
 		if (IS_ENABLED(CONFIG_BT_PERIPHERAL)) {
-			err = sdc_support_phy_update_peripheral();
-			if (err) {
-				return -ENOTSUP;
-			}
+			sdc_support_phy_update_peripheral();
 		}
 	}
 
 	if (IS_ENABLED(CONFIG_BT_CTLR_DF_CONN_CTE_RSP) && IS_ENABLED(CONFIG_BT_CENTRAL)) {
-		err = sdc_support_le_conn_cte_rsp_central();
-		if (err) {
-			return -ENOTSUP;
-		}
+		sdc_support_le_conn_cte_rsp_central();
 	}
 
 	if (IS_ENABLED(CONFIG_BT_CTLR_DF_CONN_CTE_RSP) && IS_ENABLED(CONFIG_BT_PERIPHERAL)) {
-		err = sdc_support_le_conn_cte_rsp_peripheral();
-		if (err) {
-			return -ENOTSUP;
-		}
+		sdc_support_le_conn_cte_rsp_peripheral();
+	}
+
+	if (IS_ENABLED(CONFIG_BT_CTLR_DF_ADV_CTE_TX)) {
+		sdc_support_le_connectionless_cte_transmitter();
 	}
 
 	if (IS_ENABLED(CONFIG_BT_CTLR_LE_POWER_CONTROL)) {
 		if (IS_ENABLED(CONFIG_BT_CENTRAL)) {
-			err = sdc_support_le_power_control_central();
-			if (err) {
-				return -ENOTSUP;
-			}
+			sdc_support_le_power_control_central();
 		}
 
 		if (IS_ENABLED(CONFIG_BT_PERIPHERAL)) {
-			err = sdc_support_le_power_control_peripheral();
-			if (err) {
-				return -ENOTSUP;
-			}
+			sdc_support_le_power_control_peripheral();
 		}
 
 		if (IS_ENABLED(CONFIG_BT_CTLR_LE_PATH_LOSS_MONITORING)) {
-			err = sdc_support_le_path_loss_monitoring();
-			if (err) {
-				return -ENOTSUP;
-			}
+			sdc_support_le_path_loss_monitoring();
 		}
 	}
 
 	if (IS_ENABLED(CONFIG_BT_CTLR_SCA_UPDATE)) {
 		if (IS_ENABLED(CONFIG_BT_CENTRAL)) {
-			err = sdc_support_sca_central();
-			if (err) {
-				return -ENOTSUP;
-			}
+			sdc_support_sca_central();
 		}
 
 		if (IS_ENABLED(CONFIG_BT_PERIPHERAL)) {
-			err = sdc_support_sca_peripheral();
-			if (err) {
-				return -ENOTSUP;
-			}
+			sdc_support_sca_peripheral();
 		}
 	}
 
 	if (IS_ENABLED(CONFIG_BT_CTLR_SDC_QOS_CHANNEL_SURVEY)) {
-		err = sdc_support_qos_channel_survey();
-		if (err) {
-			return -ENOTSUP;
-		}
+		sdc_support_qos_channel_survey();
 	}
 
 	if (IS_ENABLED(CONFIG_BT_CTLR_SDC_PAWR_ADV)) {
-		err = sdc_support_le_periodic_adv_with_rsp();
-		if (err) {
-			return -ENOTSUP;
-		}
+		sdc_support_le_periodic_adv_with_rsp();
 	}
 
 	if (IS_ENABLED(CONFIG_BT_CTLR_SDC_PAWR_SYNC)) {
-		err = sdc_support_le_periodic_sync_with_rsp();
-		if (err) {
-			return -ENOTSUP;
-		}
+		sdc_support_le_periodic_sync_with_rsp();
 	}
 
 	if (IS_ENABLED(CONFIG_BT_CTLR_PERIPHERAL_ISO)) {
-		err = sdc_support_cis_peripheral();
-		if (err) {
-			return -ENOTSUP;
-		}
+		sdc_support_cis_peripheral();
 	}
 
 	if (IS_ENABLED(CONFIG_BT_CTLR_CENTRAL_ISO)) {
-		err = sdc_support_cis_central();
-		if (err) {
-			return -ENOTSUP;
-		}
+		sdc_support_cis_central();
 	}
 
 	if (IS_ENABLED(CONFIG_BT_CTLR_ADV_ISO)) {
-		err = sdc_support_bis_source();
-		if (err) {
-			return -ENOTSUP;
-		}
+		sdc_support_bis_source();
 	}
 
 	if (IS_ENABLED(CONFIG_BT_CTLR_SDC_IGNORE_HCI_ISO_DATA_TS_FROM_HOST)) {
-		err = sdc_iso_host_timestamps_ignore(true);
-		if (err) {
-			return -ENOTSUP;
-		}
+		sdc_iso_host_timestamps_ignore(true);
 	}
 
 	if (IS_ENABLED(CONFIG_BT_CTLR_SYNC_ISO)) {
-		err = sdc_support_bis_sink();
-		if (err) {
-			return -ENOTSUP;
-		}
+		sdc_support_bis_sink();
 	}
 
 #if defined(CONFIG_BT_CTLR_SDC_ALLOW_PARALLEL_SCANNING_AND_INITIATING)
-	err = sdc_support_parallel_scanning_and_initiating();
-	if (err) {
-		return -ENOTSUP;
-	}
+	sdc_support_parallel_scanning_and_initiating();
 #endif
 
 	if (IS_ENABLED(CONFIG_BT_CTLR_SUBRATING)) {
 		if (IS_ENABLED(CONFIG_BT_CENTRAL)) {
-			err = sdc_support_connection_subrating_central();
-			if (err) {
-				return -ENOTSUP;
-			}
+			sdc_support_connection_subrating_central();
 		}
 		if (IS_ENABLED(CONFIG_BT_PERIPHERAL)) {
-			err = sdc_support_connection_subrating_peripheral();
-			if (err) {
-				return -ENOTSUP;
-			}
+			sdc_support_connection_subrating_peripheral();
 		}
 	}
 
-	if (IS_ENABLED(CONFIG_BT_CTLR_CHANNEL_SOUNDING_TEST)) {
-		err = sdc_support_channel_sounding_test();
-		if (err) {
-			return -ENOTSUP;
+	if (IS_ENABLED(CONFIG_BT_CTLR_FRAME_SPACE_UPDATE)) {
+		if (IS_ENABLED(CONFIG_BT_CENTRAL)) {
+			sdc_support_frame_space_update_central();
 		}
+		if (IS_ENABLED(CONFIG_BT_PERIPHERAL)) {
+			sdc_support_frame_space_update_peripheral();
+		}
+		if (IS_ENABLED(CONFIG_BT_CTLR_SDC_ENABLE_LOWEST_FRAME_SPACE)) {
+			sdc_support_lowest_frame_space();
+		}
+	}
+
+	if (IS_ENABLED(CONFIG_BT_CTLR_SHORTER_CONNECTION_INTERVALS)) {
+		if (IS_ENABLED(CONFIG_BT_CENTRAL)) {
+			sdc_support_shorter_connection_intervals_central();
+		}
+		if (IS_ENABLED(CONFIG_BT_PERIPHERAL)) {
+			sdc_support_shorter_connection_intervals_peripheral();
+		}
+	}
+
+	if (IS_ENABLED(CONFIG_BT_CTLR_EXTENDED_FEAT_SET)) {
+		sdc_support_extended_feature_set();
+	}
+
+	if (IS_ENABLED(CONFIG_BT_CTLR_LE_FLUSHABLE_ACL_DATA)) {
+		sdc_support_flushable_acl_data();
+	}
+
+	if (IS_ENABLED(CONFIG_BT_CTLR_CHANNEL_SOUNDING_TEST)) {
+		sdc_support_channel_sounding_test();
 	}
 
 	if (IS_ENABLED(CONFIG_BT_CTLR_CHANNEL_SOUNDING)) {
 #if defined(CONFIG_BT_CTLR_SDC_CS_MULTIPLE_ANTENNA_SUPPORT)
-		err = sdc_support_channel_sounding(cs_antenna_switch_func);
+		sdc_cs_antenna_switch_callback_set(cs_antenna_switch_func);
 		cs_antenna_switch_init();
-#else
-		err = sdc_support_channel_sounding(NULL);
 #endif
-		if (err) {
-			return -ENOTSUP;
-		}
 	}
 
 	if (IS_ENABLED(CONFIG_BT_CTLR_SDC_CS_STEP_MODE3)) {
-		err = sdc_support_channel_sounding_mode3();
-		if (err) {
-			return -ENOTSUP;
-		}
+		sdc_support_channel_sounding_mode3();
 	}
 
 	if (IS_ENABLED(CONFIG_BT_CTLR_SDC_CS_ROLE_INITIATOR_ONLY) ||
 		IS_ENABLED(CONFIG_BT_CTLR_SDC_CS_ROLE_BOTH)) {
-		err = sdc_support_channel_sounding_initiator_role();
-		if (err) {
-			return -ENOTSUP;
-		}
+		sdc_support_channel_sounding_initiator_role();
 	}
 
 	if (IS_ENABLED(CONFIG_BT_CTLR_SDC_CS_ROLE_REFLECTOR_ONLY) ||
 		IS_ENABLED(CONFIG_BT_CTLR_SDC_CS_ROLE_BOTH)) {
-		err = sdc_support_channel_sounding_reflector_role();
-		if (err) {
-			return -ENOTSUP;
-		}
+		sdc_support_channel_sounding_reflector_role();
 	}
 
 	if (IS_ENABLED(CONFIG_BT_CTLR_SDC_LE_POWER_CLASS_1)) {
-		err = sdc_support_le_power_class_1();
-		if (err) {
-			return -ENOTSUP;
-		}
+		sdc_support_le_power_class_1();
 	}
 
-	return 0;
+	if (IS_ENABLED(CONFIG_BT_CTLR_PRIVACY)) {
+		sdc_support_le_privacy();
+	}
+
+	if (IS_ENABLED(CONFIG_BT_CTLR_DTM)) {
+		sdc_support_direct_test_mode();
+	}
 }
 
 static int configure_memory_usage(void)
@@ -1313,11 +1248,19 @@ static int configure_memory_usage(void)
 	}
 #endif
 
-	LOG_DBG("BT mempool size: %u, required: %u",
-	       sizeof(sdc_mempool), required_memory);
+#if defined(CONFIG_BT_CTLR_SDC_EXTENDED_FEAT_MAX_REMOTE_PAGE)
+	cfg.extended_feature_page_count = CONFIG_BT_CTLR_SDC_EXTENDED_FEAT_MAX_REMOTE_PAGE;
+	required_memory = sdc_cfg_set(SDC_DEFAULT_RESOURCE_CFG_TAG,
+				      SDC_CFG_TYPE_EXTENDED_FEATURE_PAGE_COUNT, &cfg);
+	if (required_memory < 0) {
+		return required_memory;
+	}
+#endif
+
+	LOG_DBG("BT mempool size: %zu, required: %u", sizeof(sdc_mempool), required_memory);
 
 	if (required_memory > sizeof(sdc_mempool)) {
-		LOG_ERR("Allocated memory too low: %u < %u",
+		LOG_ERR("Allocated memory too low: %zu < %u",
 		       sizeof(sdc_mempool), required_memory);
 		k_panic();
 		/* No return from k_panic(). */
@@ -1395,6 +1338,45 @@ static int hci_driver_open(const struct device *dev, bt_hci_recv_t recv_func)
 		return -ENOTSUP;
 	}
 #endif /* CONFIG_BT_PER_ADV */
+
+#if defined(CONFIG_BT_CTLR_CHANNEL_SOUNDING)
+	sdc_hci_cmd_vs_cs_params_set_t cs_params_set_event_length = {
+		.cs_param_type = SDC_HCI_VS_CS_PARAM_TYPE_CS_EVENT_LENGTH_SET,
+		.cs_param_data.cs_event_length_params.cs_event_length_us =
+			CONFIG_BT_CTLR_SDC_CS_EVENT_LEN_DEFAULT
+	};
+	err = sdc_hci_cmd_vs_cs_params_set(&cs_params_set_event_length);
+	if (err) {
+		MULTITHREADING_LOCK_RELEASE();
+		return -ENOTSUP;
+	}
+#endif /* CONFIG_BT_CTLR_CHANNEL_SOUNDING */
+
+#if defined(CONFIG_BT_CTLR_CHANNEL_SOUNDING)
+	sdc_hci_cmd_vs_cs_params_set_t cs_params_set_t_pm_length = {
+		.cs_param_type = SDC_HCI_VS_CS_PARAM_TYPE_CS_T_PM_SET,
+		.cs_param_data.cs_t_pm_params.cs_t_pm_length_us =
+			CONFIG_BT_CTLR_SDC_CS_T_PM_LEN_DEFAULT
+	};
+	err = sdc_hci_cmd_vs_cs_params_set(&cs_params_set_t_pm_length);
+	if (err) {
+		MULTITHREADING_LOCK_RELEASE();
+		return -ENOTSUP;
+	}
+#endif /* CONFIG_BT_CTLR_CHANNEL_SOUNDING */
+
+#if defined(CONFIG_BT_CTLR_CHANNEL_SOUNDING)
+	sdc_hci_cmd_vs_cs_params_set_t cs_params_set_board_distance_offset = {
+		.cs_param_type = SDC_HCI_VS_CS_PARAM_TYPE_CS_BOARD_DISTANCE_OFFSET_SET,
+		.cs_param_data.cs_board_distance_offset_params.cs_board_distance_offset_cm =
+			CONFIG_BT_CTLR_SDC_CS_BOARD_DISTANCE_OFFSET,
+	};
+	err = sdc_hci_cmd_vs_cs_params_set(&cs_params_set_board_distance_offset);
+	if (err) {
+		MULTITHREADING_LOCK_RELEASE();
+		return -ENOTSUP;
+	}
+#endif /* CONFIG_BT_CTLR_CHANNEL_SOUNDING */
 
 #if defined(CONFIG_BT_CTLR_SDC_BIG_RESERVED_TIME_US)
 	sdc_hci_cmd_vs_big_reserved_time_set_t big_reserved_time_params = {
@@ -1540,10 +1522,7 @@ static int hci_driver_init(const struct device *dev)
 		return err;
 	}
 
-	err = configure_supported_features();
-	if (err) {
-		return err;
-	}
+	configure_supported_features();
 
 	err = configure_memory_usage();
 	if (err) {

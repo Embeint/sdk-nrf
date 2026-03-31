@@ -35,8 +35,8 @@ config ANOMALY_172_TIMER_IRQ_PRIORITY
 	  Levels are from 0 (highest priority) to 6 (lowest priority)
 
 config DTM_USB
-	bool "DTM over USB CDC ACM class"
-	depends on SOC_NRF5340_CPUNET && !DTM_TRANSPORT_HCI
+	bool "DTM over USB CDC ACM class [EXPERIMENTAL]"
+	depends on (SOC_NRF5340_CPUNET || SOC_NRF54H20_CPURAD) && !DTM_TRANSPORT_HCI
 	select EXPERIMENTAL
 	help
 	  Use USB instead of UART as the DTM interface. For nRF5340 the USB from application core
@@ -96,30 +96,8 @@ config DTM_FAST_RAMP_UP
 	  Do fast ramp up when starting the radio peripheral. This mode will significancy reduce
 	  the ramp up time and makes it almost the same on all supported chips.
 
-if SOC_SERIES_NRF52X
-
-configdefault NRFX_TIMER0
-	default y
-configdefault NRFX_TIMER1
-	default y
-configdefault NRFX_TIMER2
-	default y
-configdefault NRFX_TIMER3
-	default y
-
-endif # SOC_SERIES_NRF52X
-
-if SOC_SERIES_NRF54LX
-
-configdefault NRFX_TIMER20
-	default y
-configdefault NRFX_TIMER10
-	default y
-
-endif # SOC_SERIES_NRF54LX
-
 module = DTM_TRANSPORT
 module-str = "DTM_transport"
-source "${ZEPHYR_BASE}/subsys/logging/Kconfig.template.log_config"
+source "$(ZEPHYR_BASE)/subsys/logging/Kconfig.template.log_config"
 
 source "Kconfig.zephyr"

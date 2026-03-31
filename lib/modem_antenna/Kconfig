@@ -7,6 +7,11 @@
 menuconfig MODEM_ANTENNA
 	bool "Modem antenna configuration"
 	depends on NRF_MODEM_LIB
+	default y if BOARD_NRF9160DK_NRF9160_NS
+	default y if BOARD_NRF9161DK_NRF9161_NS
+	default y if BOARD_NRF9151DK_NRF9151_NS
+	default y if BOARD_THINGY91_NRF9160_NS
+	default y if BOARD_TPM530MEVK_TPM530M_NS
 
 if MODEM_ANTENNA
 
@@ -24,12 +29,18 @@ endchoice
 
 config MODEM_ANTENNA_AT_MAGPIO
 	string "AT%XMAGPIO command"
+	default "AT\%XMAGPIO=1,0,0,1,1,1574,1577" if BOARD_NRF9160DK_NRF9160_NS
+	default "AT\%XMAGPIO=1,1,1,7,1,746,803,2,698,748,2,1710,2200,3,824,894,4,880,960,5,791,849,7,1565,1586" if BOARD_THINGY91_NRF9160_NS
 	help
 	  Defines the AT%XMAGPIO command to be sent to the modem. Leave
 	  empty if this command should not be sent.
 
 config MODEM_ANTENNA_AT_COEX0
 	string "AT%XCOEX0 command"
+	# TPM530M EVK does not have an onboard antenna and LNA needs to be always enabled.
+	# The next line is needed for correct configuration when CONFIG_MODEM_ANTENNA_GNSS_EXTERNAL
+	# is enabled.
+	default "AT\%XCOEX0=1,1,1565,1586" if BOARD_TPM530MEVK_TPM530M_NS
 	default "AT\%XCOEX0=1,1,1565,1586" if MODEM_ANTENNA_GNSS_ONBOARD
 	default "AT\%XCOEX0" if MODEM_ANTENNA_GNSS_EXTERNAL
 	help
@@ -67,8 +78,7 @@ config MODEM_ANTENNA_AT_MIPIRFFECTRL_PWROFF
 	  Leave empty if this command should not be sent.
 
 module=MODEM_ANTENNA
-module-dep=LOG
 module-str=Modem antenna
-source "${ZEPHYR_BASE}/subsys/logging/Kconfig.template.log_config"
+source "$(ZEPHYR_BASE)/subsys/logging/Kconfig.template.log_config"
 
 endif # MODEM_ANTENNA
