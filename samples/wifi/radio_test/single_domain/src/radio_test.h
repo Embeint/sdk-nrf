@@ -67,6 +67,12 @@ enum radio_test_mode {
 
 	/** Duty-cycled modulated TX carrier. */
 	MODULATED_TX_DUTY_CYCLE,
+
+	/** TX carrier sweep with unmodulated carrier wave. */
+	TX_SWEEP_WITH_SLEEP,
+
+	/** TX carrier sweep with modulated carrier wave. */
+	TX_SWEEP_WITH_SLEEP_MODULATED,
 };
 
 /**@brief Radio test front-end module (FEM) configuration */
@@ -173,6 +179,32 @@ struct radio_test_config {
 			/** Duty cycle. */
 			uint32_t duty_cycle;
 		} modulated_tx_duty_cycle;
+
+		struct {
+			/** Radio output power. */
+			int8_t txpower;
+
+			/** Radio transmission time in us. */
+			uint16_t t_tx_us;
+
+			/** Radio sleep time in us. */
+			uint16_t t_sleep_us;
+		} tx_sweep_with_sleep;
+
+		struct {
+			/** Radio output power. */
+			int8_t txpower;
+
+			/** Radio transmission pattern. */
+			enum transmit_pattern pattern;
+
+			/** Radio transmission time in us. */
+			uint16_t t_tx_us;
+
+			/** Radio sleep time in us. */
+			uint16_t t_sleep_us;
+		} tx_sweep_with_sleep_modulated;
+
 	} params;
 
 #if CONFIG_FEM
@@ -194,6 +226,15 @@ struct radio_rx_stats {
 
 	/** Number of received packets with valid CRC. */
 	uint32_t packet_cnt;
+};
+
+/**@brief Configurable channel sequence for TX with sleep. */
+struct radio_test_channel_sequence {
+	/** Length of configurable channel sequence. */
+	uint8_t sequence_length;
+
+	/** Configurable channel sequence contents. */
+	uint8_t sequence_array[80];
 };
 
 /**
@@ -233,5 +274,12 @@ void radio_rx_stats_get(struct radio_rx_stats *rx_stats);
  * @param[in] dcdc_state  DC/DC converter state.
  */
 void toggle_dcdc_state(uint8_t dcdc_state);
+
+/**
+ * @brief Function for getting the radio_test_channel_sequence for the TX sweep with sleep.
+ *
+ * @return Pointer to the static channel_sequence in the radio_test
+ */
+struct radio_test_channel_sequence *radio_test_channel_sequence_get(void);
 
 #endif /* RADIO_TEST_H_ */

@@ -25,28 +25,42 @@ LOG_MODULE_REGISTER(mspi_hpf, CONFIG_MSPI_LOG_LEVEL);
 #define MAX_TX_MSG_SIZE		     (DT_REG_SIZE(DT_NODELABEL(sram_tx)))
 #define MAX_RX_MSG_SIZE		     (DT_REG_SIZE(DT_NODELABEL(sram_rx)))
 #define IPC_TIMEOUT_MS		     100
+#define IPC_BOUND_TIMEOUT_MS	     100
+#define IPC_BOUND_RETRY_COUNT	     10
+#define IPC_BOUND_RETRY_DELAY_MS	     10
 #define EP_SEND_TIMEOUT_MS	     10
 #define EXTREME_DRIVE_FREQ_THRESHOLD 32000000
 #define CNT0_TOP_CALCULATE(freq)     (NRFX_CEIL_DIV(SystemCoreClock, freq * 2) - 1)
 #define DATA_LINE_INDEX(pinctr_fun)  (pinctr_fun - NRF_FUN_HPF_MSPI_DQ0)
 #define DATA_PIN_UNUSED              UINT8_MAX
 
-#ifdef CONFIG_SOC_NRF54L15
+#if defined(CONFIG_SOC_NRF54L15) || defined(CONFIG_SOC_NRF54LM20A) || \
+	defined(CONFIG_SOC_NRF54LM20B)
 
-#define HPF_MSPI_PORT_NUMBER	 2 /* Physical port number */
+#define HPF_MSPI_PORT_NUMBER	2 /* Physical port number */
 #define HPF_MSPI_SCK_PIN_NUMBER 1 /* Physical pin number on port 2 */
 
 #define HPF_MSPI_DATA_LINE_CNT_MAX 8
+#define HPF_MSPI_CS_LINE_CNT_MAX 5
+#define MAX_MSPI_DUMMY_CLOCKS 59
 #else
 #error "Unsupported SoC for HPF MSPI"
 #endif
 
+#ifdef CONFIG_PINCTRL_STORE_REG
 #define HPF_MPSI_PINCTRL_DEV_CONFIG_INIT(node_id)                                                  \
 	{                                                                                          \
 		.reg = PINCTRL_REG_NONE,                                                           \
 		.states = Z_PINCTRL_STATES_NAME(node_id),                                          \
 		.state_cnt = ARRAY_SIZE(Z_PINCTRL_STATES_NAME(node_id)),                           \
 	}
+#else
+#define HPF_MPSI_PINCTRL_DEV_CONFIG_INIT(node_id)                                                  \
+	{                                                                                          \
+		.states = Z_PINCTRL_STATES_NAME(node_id),                                          \
+		.state_cnt = ARRAY_SIZE(Z_PINCTRL_STATES_NAME(node_id)),                           \
+	}
+#endif
 
 #define HPF_MSPI_PINCTRL_DT_DEFINE(node_id)                                                        \
 	LISTIFY(DT_NUM_PINCTRL_STATES(node_id), Z_PINCTRL_STATE_PINS_DEFINE, (;), node_id);        \
@@ -73,11 +87,11 @@ static atomic_t ipc_atomic_sem = ATOMIC_INIT(0);
 #define MSPI_CONFIG                                                                                \
 	{                                                                                          \
 		.channel_num = 0,                                                                  \
-		.op_mode = DT_PROP_OR(MSPI_HPF_NODE, op_mode, MSPI_OP_MODE_CONTROLLER),           \
-		.duplex = DT_PROP_OR(MSPI_HPF_NODE, duplex, MSPI_FULL_DUPLEX),                    \
-		.dqs_support = DT_PROP_OR(MSPI_HPF_NODE, dqs_support, false),                     \
-		.num_periph = DT_CHILD_NUM(MSPI_HPF_NODE),                                        \
-		.max_freq = DT_PROP(MSPI_HPF_NODE, clock_frequency),                              \
+		.op_mode = DT_ENUM_IDX_OR(MSPI_HPF_NODE, op_mode, MSPI_OP_MODE_CONTROLLER),        \
+		.duplex = DT_ENUM_IDX_OR(MSPI_HPF_NODE, duplex, MSPI_HALF_DUPLEX),                 \
+		.dqs_support = DT_PROP_OR(MSPI_HPF_NODE, dqs_support, false),                      \
+		.num_periph = DT_CHILD_NUM(MSPI_HPF_NODE),                                         \
+		.max_freq = DT_PROP(MSPI_HPF_NODE, clock_frequency),                               \
 		.re_init = true,                                                                   \
 		.sw_multi_periph = false,                                                          \
 	}
@@ -291,6 +305,71 @@ static int hpf_mspi_wait_for_response(hpf_mspi_opcode_t opcode, uint32_t timeout
 	return 0;
 }
 
+static int hpf_mspi_wait_for_endpoint_bound(void)
+{
+#if defined(CONFIG_MULTITHREADING)
+	int ret = k_sem_take(&ipc_sem, K_MSEC(IPC_BOUND_TIMEOUT_MS));
+
+	return (ret < 0) ? -ETIMEDOUT : 0;
+#else
+#if defined(CONFIG_SYS_CLOCK_EXISTS)
+	uint32_t start = k_uptime_get_32();
+#else
+	uint32_t repeat = IPC_BOUND_TIMEOUT_MS * 1000; /* Convert ms to us */
+#endif
+
+	while (!atomic_test_and_clear_bit(&ipc_atomic_sem, HPF_MSPI_EP_BOUNDED)) {
+#if defined(CONFIG_SYS_CLOCK_EXISTS)
+		if ((k_uptime_get_32() - start) > IPC_BOUND_TIMEOUT_MS) {
+			return -ETIMEDOUT;
+		}
+#else
+		repeat--;
+		if (repeat == 0U) {
+			return -ETIMEDOUT;
+		}
+#endif
+		k_sleep(K_USEC(1));
+	}
+
+	return 0;
+#endif
+}
+
+static int hpf_mspi_register_endpoint_with_retry(const struct device *ipc_instance)
+{
+	int ret;
+
+	for (int attempt = 0; attempt < IPC_BOUND_RETRY_COUNT; attempt++) {
+#if defined(CONFIG_MULTITHREADING)
+		k_sem_reset(&ipc_sem);
+#else
+		atomic_clear_bit(&ipc_atomic_sem, HPF_MSPI_EP_BOUNDED);
+#endif
+
+		ret = ipc_service_register_endpoint(ipc_instance, &ep, &ep_cfg);
+		if (ret < 0) {
+			LOG_ERR("ipc_service_register_endpoint() failure");
+			return ret;
+		}
+
+		ret = hpf_mspi_wait_for_endpoint_bound();
+		if (ret == 0) {
+			return 0;
+		}
+
+		ret = ipc_service_deregister_endpoint(&ep);
+		if (ret < 0) {
+			LOG_ERR("ipc_service_deregister_endpoint() failure");
+			return ret;
+		}
+
+		k_sleep(K_MSEC(IPC_BOUND_RETRY_DELAY_MS));
+	}
+
+	return -ETIMEDOUT;
+}
+
 /**
  * @brief Send data to the FLPR core using the IPC service, and wait for FLPR response.
  *
@@ -460,6 +539,27 @@ static int api_config(const struct mspi_dt_spec *spec)
 	if (config->max_freq > drv_cfg->mspicfg.max_freq) {
 		LOG_ERR("max_freq is too large.");
 		return -ENOTSUP;
+	}
+
+	if (config->duplex != MSPI_HALF_DUPLEX) {
+		LOG_ERR("Only half-duplex mode is supported.");
+		return -ENOTSUP;
+	}
+
+	if (config->num_ce_gpios > HPF_MSPI_CS_LINE_CNT_MAX) {
+		LOG_ERR("Invalid number of CE GPIOs: %d", config->num_ce_gpios);
+		return -EINVAL;
+	}
+
+	if (config->num_periph > HPF_MSPI_CS_LINE_CNT_MAX) {
+		LOG_ERR("Invalid MSPI peripheral number.");
+		return -EINVAL;
+	}
+
+	if (config->num_ce_gpios != 0 &&
+	    config->num_ce_gpios != config->num_periph) {
+		LOG_ERR("Invalid number of ce_gpios vs num_periph.");
+		return -EINVAL;
 	}
 
 	/* Create pinout configuration */
@@ -668,6 +768,29 @@ static int api_dev_config(const struct device *dev, const struct mspi_dev_id *de
 		}
 	}
 
+	if (param_mask & MSPI_DEVICE_CONFIG_CE_NUM) {
+		if (cfg->ce_num > HPF_MSPI_CS_LINE_CNT_MAX) {
+			LOG_ERR("CE number %d not supported.", cfg->ce_num);
+			return -EINVAL;
+		}
+	}
+
+	if (param_mask & MSPI_DEVICE_CONFIG_RX_DUMMY) {
+		if (cfg->rx_dummy > MAX_MSPI_DUMMY_CLOCKS) {
+			LOG_ERR("Value of RX dummy clock is too big. Max: %d is supported.",
+				MAX_MSPI_DUMMY_CLOCKS);
+			return -ENOTSUP;
+		}
+	}
+
+	if (param_mask & MSPI_DEVICE_CONFIG_TX_DUMMY) {
+		if (cfg->tx_dummy > MAX_MSPI_DUMMY_CLOCKS) {
+			LOG_ERR("Value of TX dummy clock is too big. Max: %d is supported.",
+				MAX_MSPI_DUMMY_CLOCKS);
+			return -ENOTSUP;
+		}
+	}
+
 	mspi_dev_config_msg.opcode = HPF_MSPI_CONFIG_DEV;
 	mspi_dev_config_msg.device_index = dev_id->dev_idx;
 	mspi_dev_config_msg.dev_config.io_mode = cfg->io_mode;
@@ -813,8 +936,8 @@ static int start_next_packet(struct mspi_xfer *xfer, uint32_t packets_done)
  * @param req Pointer to the xfer structure.
  *
  * @retval 0 If successful.
- * @retval -ENOTSUP If asynchronous transfers are requested.
- * @retval -EIO If an I/O error occurs.
+ * @retval -ENOTSUP If the requested transfer configuration is not supported.
+ * @retval -EIO General input / output error, failed to send over the bus.
  */
 static int api_transceive(const struct device *dev, const struct mspi_dev_id *dev_id,
 			  const struct mspi_xfer *req)
@@ -824,7 +947,8 @@ static int api_transceive(const struct device *dev, const struct mspi_dev_id *de
 	int rc;
 
 	/* TODO: add support for asynchronous transfers */
-	if (req->async) {
+	if ((req->async) || (req->xfer_mode != MSPI_PIO) ||
+	    (req->tx_dummy > MAX_MSPI_DUMMY_CLOCKS) || (req->rx_dummy > MAX_MSPI_DUMMY_CLOCKS)) {
 		return -ENOTSUP;
 	}
 
@@ -898,6 +1022,9 @@ static void flpr_fault_handler(const struct device *dev, void *user_data)
 {
 	ARG_UNUSED(dev);
 	ARG_UNUSED(user_data);
+	const struct device *const flpr_fault_timer = DEVICE_DT_GET(DT_NODELABEL(fault_timer));
+
+	counter_stop(flpr_fault_timer);
 
 	LOG_ERR("HPF fault detected.");
 }
@@ -946,19 +1073,14 @@ static int hpf_mspi_init(const struct device *dev)
 		return ret;
 	}
 
-	ret = ipc_service_register_endpoint(ipc_instance, &ep, &ep_cfg);
-	if (ret < 0) {
-		LOG_ERR("ipc_service_register_endpoint() failure");
+	ret = hpf_mspi_register_endpoint_with_retry(ipc_instance);
+	if (ret == -ETIMEDOUT) {
+		LOG_ERR("Endpoint bind timeout: %d", ret);
+		return ret;
+	} else if (ret < 0) {
+		LOG_ERR("Endpoint registration/deregistration failed: %d", ret);
 		return ret;
 	}
-
-	/* Wait for ep to be bounded */
-#if defined(CONFIG_MULTITHREADING)
-	k_sem_take(&ipc_sem, K_FOREVER);
-#else
-	while (!atomic_test_and_clear_bit(&ipc_atomic_sem, HPF_MSPI_EP_BOUNDED)) {
-	}
-#endif
 
 	ret = api_config(&spec);
 	if (ret < 0) {

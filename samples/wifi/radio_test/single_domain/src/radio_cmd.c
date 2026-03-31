@@ -10,9 +10,9 @@
 #include <zephyr/init.h>
 #include <zephyr/shell/shell.h>
 #include <zephyr/types.h>
-#if !defined(CONFIG_SOC_SERIES_NRF54HX)
+#if !defined(CONFIG_SOC_SERIES_NRF54H)
 #include <hal/nrf_power.h>
-#endif /* !defined(CONFIG_SOC_SERIES_NRF54HX) */
+#endif /* !defined(CONFIG_SOC_SERIES_NRF54H) */
 
 #if CONFIG_FEM
 #include "fem_al/fem_al.h"
@@ -30,7 +30,6 @@
 	"Toggle DCDC state <state>, "			\
 	"Toggle DC/DC state regardless of state value"
 #endif
-
 
 /* Radio parameter configuration. */
 static struct radio_param_config {
@@ -55,6 +54,12 @@ static struct radio_param_config {
 	/** Duty cycle. */
 	uint32_t duty_cycle;
 
+	/** Radio transmission time in us */
+	uint16_t t_tx_us;
+
+	/** Radio sleep time in us */
+	uint16_t t_sleep_us;
+
 	/**
 	 * Number of packets to be received.
 	 * Set to zero for continuous RX.
@@ -77,6 +82,9 @@ static struct radio_param_config {
 	.fem.tx_power_control = FEM_USE_DEFAULT_TX_POWER_CONTROL
 #endif /* CONFIG_FEM */
 };
+
+const static uint16_t min_tx_time_us = 20;
+const static uint16_t min_sleep_time_us = 80;
 
 /* Radio test configuration. */
 static struct radio_test_config test_config;
@@ -189,7 +197,6 @@ static int cmd_time_set(const struct shell *shell, size_t argc, char **argv)
 
 static int cmd_cancel(const struct shell *shell, size_t argc, char **argv)
 {
-	shell_print(shell, "Cancelling test type: %d", test_config.type);
 	radio_test_cancel(test_config.type);
 	test_in_progress = false;
 	return 0;
@@ -631,6 +638,156 @@ static int cmd_tx_sweep_start(const struct shell *shell, size_t argc,
 	return 0;
 }
 
+static int cmd_tx_sweep_with_sleep_start(const struct shell *shell, size_t argc,
+			      char **argv)
+{
+	if (argc == 1) {
+		shell_help(shell);
+		return SHELL_CMD_HELP_PRINTED;
+	}
+
+	if (argc != 3) {
+		shell_error(shell, "%s: bad parameters count", argv[0]);
+		return -EINVAL;
+	}
+
+	uint16_t tx_time = atoi(argv[1]);
+	uint16_t sleep_time = atoi(argv[2]);
+
+	if (sleep_time < min_sleep_time_us) {
+		shell_error(shell, "Too short sleep time: %ius.\nNeeds to be at least: %ius",
+			    sleep_time, min_sleep_time_us);
+		return -EINVAL;
+	}
+
+	if (tx_time < min_tx_time_us) {
+		shell_error(shell, "Too short tx time: %ius.\nNeeds to be at least: %ius", tx_time,
+			    min_tx_time_us);
+		return -EINVAL;
+	}
+
+	config.t_tx_us = tx_time;
+	config.t_sleep_us = sleep_time;
+
+	memset(&test_config, 0, sizeof(test_config));
+	test_config.type = TX_SWEEP_WITH_SLEEP;
+	test_config.mode = config.mode;
+	test_config.params.tx_sweep_with_sleep.t_tx_us = config.t_tx_us;
+	test_config.params.tx_sweep_with_sleep.t_sleep_us = config.t_sleep_us;
+	test_config.params.tx_sweep_with_sleep.txpower = config.txpower;
+
+	radio_test_start(&test_config);
+
+	test_in_progress = true;
+
+	shell_print(shell, "TX sweep with duty cycle");
+	return 0;
+}
+
+static int cmd_tx_sweep_with_sleep_modulated_start(
+	const struct shell *shell, size_t argc, char **argv)
+{
+	if (argc == 1) {
+		shell_help(shell);
+		return SHELL_CMD_HELP_PRINTED;
+	}
+
+	if (argc != 3) {
+		shell_error(shell, "%s: bad parameters count", argv[0]);
+		return -EINVAL;
+	}
+
+	uint16_t tx_time = atoi(argv[1]);
+	uint16_t sleep_time = atoi(argv[2]);
+
+	if (tx_time < min_tx_time_us) {
+		shell_error(shell, "Too short tx time: %ius.\nNeeds to be at least: %ius",
+			    tx_time, min_tx_time_us);
+		return -EINVAL;
+	}
+
+	if (sleep_time < min_sleep_time_us) {
+		shell_error(shell,
+			    "Too short sleep time: %ius.\nNeeds to be at least: %ius",
+			    sleep_time, min_sleep_time_us);
+		return -EINVAL;
+	}
+
+
+	if (test_in_progress) {
+		radio_test_cancel(test_config.type);
+		test_in_progress = false;
+	}
+
+	memset(&test_config, 0, sizeof(test_config));
+	test_config.type = TX_SWEEP_WITH_SLEEP_MODULATED;
+	test_config.mode = config.mode;
+	test_config.params.tx_sweep_with_sleep_modulated.txpower = config.txpower;
+	test_config.params.tx_sweep_with_sleep_modulated.pattern = config.tx_pattern;
+	test_config.params.tx_sweep_with_sleep_modulated.t_tx_us = tx_time;
+	test_config.params.tx_sweep_with_sleep_modulated.t_sleep_us = sleep_time;
+#if CONFIG_FEM
+	test_config.fem = config.fem;
+#endif /* CONFIG_FEM */
+
+	radio_test_start(&test_config);
+	test_in_progress = true;
+	shell_print(shell, "Modulated TX sweep with duty cycle");
+	return 0;
+}
+
+static int cmd_set_channel_sequence(const struct shell *shell, size_t argc,
+							 char **argv)
+{
+	if (argc == 1) {
+		shell_help(shell);
+		return SHELL_CMD_HELP_PRINTED;
+	}
+
+	uint8_t sequence_length = argc - 1;
+
+	if (sequence_length > 80) {
+		shell_error(shell, "Too many channels in array, %i is larger than 80",
+			    sequence_length);
+	}
+
+	for (uint8_t i = 0; i < sequence_length; i++) {
+		int channel = atoi(argv[i + 1]);
+
+		if (channel > 80 || channel < 0) {
+			shell_error(shell, "Channel number %i with value %i is out of range. "
+				"Allowed range for channels is 0 to 80", i,
+				    channel);
+			return -EINVAL;
+		}
+	}
+
+	struct radio_test_channel_sequence *channel_sequence = radio_test_channel_sequence_get();
+
+	channel_sequence->sequence_length = sequence_length;
+	for (uint8_t i = 0; i < sequence_length; i++) {
+		uint8_t channel = atoi(argv[i + 1]);
+
+		channel_sequence->sequence_array[i] = channel;
+	}
+	return 0;
+}
+
+static int cmd_print_channel_sequence(const struct shell *shell, size_t argc, char **argv)
+{
+	struct radio_test_channel_sequence *channel_sequence = radio_test_channel_sequence_get();
+
+	shell_print(shell, "Channel Sequence length: %i", channel_sequence->sequence_length);
+	shell_fprintf_normal(shell, "Channel Sequence: [%i", channel_sequence->sequence_array[0]);
+
+	for (uint8_t i = 1; i < channel_sequence->sequence_length; i++) {
+		shell_fprintf_normal(shell, ", %i", channel_sequence->sequence_array[i]);
+	}
+
+	shell_print(shell, "]");
+	return 0;
+}
+
 static int cmd_rx_start(const struct shell *shell, size_t argc, char **argv)
 {
 	if (test_in_progress) {
@@ -650,6 +807,21 @@ static int cmd_rx_start(const struct shell *shell, size_t argc, char **argv)
 	memset(&test_config, 0, sizeof(test_config));
 	test_config.type = RX;
 	test_config.mode = config.mode;
+
+#if CONFIG_HAS_HW_NRF_RADIO_BLE_CODED
+	if (config.mode == NRF_RADIO_MODE_BLE_LR125KBIT ||
+	    config.mode == NRF_RADIO_MODE_BLE_LR500KBIT) {
+		shell_warn(
+			shell,
+			"Warning:\n Due to required post-processing in the receiver,"
+			" only every second packet sent by a device\n"
+			" running the start_tx_modulated_carrier command"
+			" with the configured data rate: %s can be received. Starting RX anyway.",
+			config.mode == NRF_RADIO_MODE_BLE_LR125KBIT ? "ble_lr125kbit"
+								    : "ble_lr500kbit");
+	}
+#endif /* CONFIG_HAS_HW_NRF_RADIO_BLE_CODED */
+
 	test_config.params.rx.channel = config.channel_start;
 	test_config.params.rx.pattern = config.tx_pattern;
 #if CONFIG_FEM
@@ -1471,6 +1643,21 @@ SHELL_CMD_REGISTER(parameters_print, NULL,
 		   cmd_print);
 SHELL_CMD_REGISTER(start_rx_sweep, NULL, "Start RX sweep", cmd_rx_sweep_start);
 SHELL_CMD_REGISTER(start_tx_sweep, NULL, "Start TX sweep", cmd_tx_sweep_start);
+SHELL_CMD_REGISTER(start_tx_sweep_with_sleep, NULL,
+		   "Start TX sweep with sleep cycle, "
+		   "<tx_time> (us) <sleep_time> (us)",
+		   cmd_tx_sweep_with_sleep_start);
+SHELL_CMD_REGISTER(set_channel_sequence, NULL,
+		   "Set a custom channel sequence for TX "
+		   "<sequence_of_up_to_80_channels>",
+		   cmd_set_channel_sequence);
+SHELL_CMD_REGISTER(print_channel_sequence, NULL,
+		   "Print the custom channel sequence for TX.",
+		   cmd_print_channel_sequence);
+SHELL_CMD_REGISTER(start_tx_sweep_with_sleep_modulated, NULL,
+		   "Start modulated TX sweep with sleep cycle, "
+		   "<tx_time> (us) <sleep_time> (us)",
+		   cmd_tx_sweep_with_sleep_modulated_start);
 SHELL_CMD_REGISTER(start_rx, NULL, "Start RX", cmd_rx_start);
 SHELL_CMD_REGISTER(print_rx, NULL, "Print RX payload", cmd_print_payload);
 #if defined(TOGGLE_DCDC_HELP)

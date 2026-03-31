@@ -9,9 +9,9 @@
 #include <string.h>
 #include <inttypes.h>
 
-#if !(defined(CONFIG_SOC_SERIES_NRF54HX) || defined(CONFIG_SOC_SERIES_NRF54LX))
+#if !(defined(CONFIG_SOC_SERIES_NRF54H) || defined(CONFIG_SOC_SERIES_NRF54L))
 #include <hal/nrf_power.h>
-#endif /* !(defined(CONFIG_SOC_SERIES_NRF54HX) || defined(CONFIG_SOC_SERIES_NRF54LX)) */
+#endif /* !(defined(CONFIG_SOC_SERIES_NRF54H) || defined(CONFIG_SOC_SERIES_NRF54L)) */
 
 #ifdef NRF53_SERIES
 #include <hal/nrf_vreqctrl.h>
@@ -49,7 +49,7 @@
 /* Frequency calculation for a given channel. */
 #define CHAN_TO_FREQ(_channel) (2400 + _channel)
 
-#if defined(CONFIG_SOC_SERIES_NRF54HX)
+#if defined(CONFIG_SOC_SERIES_NRF54H)
 	#define RADIO_TEST_EGU                     NRF_EGU020
 	#define RADIO_TEST_TIMER_INSTANCE          020
 	#define RADIO_TEST_TIMER_IRQn              TIMER020_IRQn
@@ -57,7 +57,7 @@
 	#define RADIO_TEST_SHORT_END_DISABLE_MASK  NRF_RADIO_SHORT_PHYEND_DISABLE_MASK
 	#define RADIO_TEST_INT_END_MASK            NRF_RADIO_INT_PHYEND_MASK
 	#define RADIO_TEST_EVENT_END               NRF_RADIO_EVENT_PHYEND
-#elif defined(CONFIG_SOC_SERIES_NRF54LX)
+#elif defined(CONFIG_SOC_SERIES_NRF54L) || defined(CONFIG_SOC_SERIES_NRF71)
 	#define RADIO_TEST_EGU                     NRF_EGU10
 	#define RADIO_TEST_TIMER_INSTANCE          10
 	#define RADIO_TEST_TIMER_IRQn              TIMER10_IRQn
@@ -73,17 +73,27 @@
 	#define RADIO_TEST_SHORT_END_DISABLE_MASK  NRF_RADIO_SHORT_END_DISABLE_MASK
 	#define RADIO_TEST_INT_END_MASK            NRF_RADIO_INT_END_MASK
 	#define RADIO_TEST_EVENT_END               NRF_RADIO_EVENT_END
-#endif /* defined(CONFIG_SOC_SERIES_NRF54HX) */
-
-#define RADIO_TEST_TIMER_IRQ_HANDLER NRFX_CONCAT_3(nrfx_timer_, RADIO_TEST_TIMER_INSTANCE, _irq_handler)
+#endif /* defined(CONFIG_SOC_SERIES_NRF54H) */
 
 #define ENDPOINT_EGU_RADIO_TX    BIT(1)
 #define ENDPOINT_EGU_RADIO_RX    BIT(2)
 #define ENDPOINT_TIMER_RADIO_TX  BIT(3)
 #define ENDPOINT_FORK_EGU_TIMER  BIT(4)
 
+#define TIMER_CC0_SWEEP_DWELL NRF_TIMER_CC_CHANNEL0
+#define TIMER_CC1_MOD_TX_DUTY NRF_TIMER_CC_CHANNEL1
+#define TIMER_CC2_FEM_0 NRF_TIMER_CC_CHANNEL2
+#define TIMER_CC3_FEM_1 NRF_TIMER_CC_CHANNEL3
+#define TIMER_CC4_SWEEP_DUTY NRF_TIMER_CC_CHANNEL4
+#if NRF54H_ERRATA_216_PRESENT
+#define TIMER_CC7_ERRATA216 NRF_TIMER_CC_CHANNEL7
+#endif /* NRF54H_ERRATA_216_PRESENT */
+
 /* RX timeout counted from the last packet received. */
 #define RX_PACKET_TIMEOUT_MS 100
+
+/* Ramp-up time for radio when using fast ramp. */
+#define RADIO_RAMP_UP_FAST_US 40
 
 /* Buffer for the radio TX packet */
 static uint8_t tx_packet[RADIO_MAX_PAYLOAD_LEN];
@@ -97,8 +107,21 @@ static uint32_t rx_packet_cnt;
 /* Radio current channel (frequency). */
 static uint8_t current_channel;
 
+/* Modulated TX sweep with sleep: sequential index into channel_array. */
+static uint8_t mod_tx_sweep_ch_idx;
+
+/* Radio TX Sweep with sleep channel array */
+static struct radio_test_channel_sequence channel_sequence = {
+	.sequence_length = 72,
+	.sequence_array = {4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
+	17, 18, 19, 20, 21, 22, 23, 24, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41,
+	42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63,
+	64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78}
+};
+
 /* Timer used for channel sweeps and tx with duty cycle. */
-static const nrfx_timer_t timer = NRFX_TIMER_INSTANCE(RADIO_TEST_TIMER_INSTANCE);
+static nrfx_timer_t timer =
+	NRFX_TIMER_INSTANCE(NRF_TIMER_INST_GET(RADIO_TEST_TIMER_INSTANCE));
 
 static bool sweep_processing;
 
@@ -106,7 +129,7 @@ static bool sweep_processing;
 static uint16_t total_payload_size;
 
 /* PPI channel for starting radio */
-static uint8_t ppi_radio_start;
+static nrfx_gppi_handle_t ppi_radio_start;
 
 /* PPI endpoint status.*/
 static atomic_t endpoint_state;
@@ -126,12 +149,14 @@ static const struct mbox_dt_spec on_channel =
 	MBOX_DT_SPEC_GET(DT_NODELABEL(cpurad_cpusys_errata216_mboxes), on_req);
 static const struct mbox_dt_spec off_channel =
 	MBOX_DT_SPEC_GET(DT_NODELABEL(cpurad_cpusys_errata216_mboxes), off_req);
-#endif /* NRF54H_ERRATA_216_PRESENT */
 
 /* Delay time from triggering the task "ON" for SysCtrl to starting RADIO (setting RADIO TASK RXEN
  * or TXEN)
  */
 #define HMPAN_216_DELAY_US (40)
+
+static K_SEM_DEFINE(errata_216_sem, 0, 1);
+#endif /* NRF54H_ERRATA_216_PRESENT */
 
 /**
  * @brief Send errata HMPAN-216 on request signal to SysCtrl
@@ -141,27 +166,68 @@ static const struct mbox_dt_spec off_channel =
  *
  * @return 0 if successful, otherwise a negative error code
  */
+#if NRF54H_ERRATA_216_PRESENT
 static int errata_216_on_wait(void)
 {
-	return 0;
+	if (!nrf54h_errata_216()) {
+		return 0;
+	}
+
+	int err = 0;
+
+	nrfx_timer_disable(&timer);
+	nrf_timer_shorts_disable(timer.p_reg, ~0);
+	nrf_timer_int_disable(timer.p_reg, ~0);
+
+	nrfx_timer_compare(&timer,
+		TIMER_CC7_ERRATA216,
+		nrfx_timer_us_to_ticks(&timer, HMPAN_216_DELAY_US),
+		true);
+
+	err = mbox_send_dt(&on_channel, NULL);
+
+	if (!err) {
+		nrfx_timer_enable(&timer);
+
+		/* Wait for the TIMER to count the required delay before starting the Radio*/
+		err = k_sem_take(&errata_216_sem, K_FOREVER);
+	}
+
+	return err;
 }
+#endif /* NRF54H_ERRATA_216_PRESENT */
 
 /**
  * @brief Send errata HMPAN-216 off request signal to SysCtrl
  *
  * @return 0 if successful, otherwise a negative error code
  */
+#if NRF54H_ERRATA_216_PRESENT
 static int errata_216_off(void)
 {
-	return 0;
+	if (!nrf54h_errata_216()) {
+		return 0;
+	}
+	return mbox_send_dt(&off_channel, NULL);
 }
+#endif /* NRF54H_ERRATA_216_PRESENT */
 
 /**
  * @brief Return to code execution after the required delay for errata HMPAN-216 has elapsed.
  */
+#if NRF54H_ERRATA_216_PRESENT
 static void errata_216_release(void)
 {
+	if (!nrf54h_errata_216()) {
+		return;
+	}
+
+	/* Release the waiting semaphore, continue code execution and disable TIMER */
+	k_sem_give(&errata_216_sem);
+	nrfx_timer_disable(&timer);
+	nrf_timer_int_disable(timer.p_reg, ~0);
 }
+#endif /* NRF54H_ERRATA_216_PRESENT */
 
 #if CONFIG_FEM
 static struct radio_test_fem fem;
@@ -386,23 +452,22 @@ static void radio_power_set(nrf_radio_mode_t mode, uint8_t channel, int8_t power
 static void endpoints_clear(void)
 {
 	if (atomic_test_and_clear_bit(&endpoint_state, ENDPOINT_FORK_EGU_TIMER)) {
-		nrfx_gppi_fork_endpoint_clear(ppi_radio_start,
-			nrf_timer_task_address_get(timer.p_reg, NRF_TIMER_TASK_START));
+		nrfx_gppi_ep_clear(nrf_timer_task_address_get(timer.p_reg, NRF_TIMER_TASK_START));
 	}
 	if (atomic_test_and_clear_bit(&endpoint_state, ENDPOINT_EGU_RADIO_TX)) {
-		nrfx_gppi_channel_endpoints_clear(ppi_radio_start,
-			nrf_egu_event_address_get(RADIO_TEST_EGU, RADIO_TEST_EGU_EVENT),
-			nrf_radio_task_address_get(NRF_RADIO, NRF_RADIO_TASK_TXEN));
+		nrfx_gppi_ep_clear(
+				nrf_egu_event_address_get(RADIO_TEST_EGU, RADIO_TEST_EGU_EVENT));
+		nrfx_gppi_ep_clear(nrf_radio_task_address_get(NRF_RADIO, NRF_RADIO_TASK_TXEN));
 	}
 	if (atomic_test_and_clear_bit(&endpoint_state, ENDPOINT_EGU_RADIO_RX)) {
-		nrfx_gppi_channel_endpoints_clear(ppi_radio_start,
-			nrf_egu_event_address_get(RADIO_TEST_EGU, RADIO_TEST_EGU_EVENT),
-			nrf_radio_task_address_get(NRF_RADIO, NRF_RADIO_TASK_RXEN));
+		nrfx_gppi_ep_clear(
+				nrf_egu_event_address_get(RADIO_TEST_EGU, RADIO_TEST_EGU_EVENT));
+		nrfx_gppi_ep_clear(nrf_radio_task_address_get(NRF_RADIO, NRF_RADIO_TASK_RXEN));
 	}
 	if (atomic_test_and_clear_bit(&endpoint_state, ENDPOINT_TIMER_RADIO_TX)) {
-		nrfx_gppi_channel_endpoints_clear(ppi_radio_start,
-			nrf_timer_event_address_get(timer.p_reg, NRF_TIMER_EVENT_COMPARE0),
-			nrf_radio_task_address_get(NRF_RADIO, NRF_RADIO_TASK_TXEN));
+		nrfx_gppi_ep_clear(
+			nrf_timer_event_address_get(timer.p_reg, NRF_TIMER_EVENT_COMPARE0));
+		nrfx_gppi_ep_clear(nrf_radio_task_address_get(NRF_RADIO, NRF_RADIO_TASK_TXEN));
 	}
 }
 
@@ -410,33 +475,33 @@ static void radio_ppi_config(bool rx)
 {
 	endpoints_clear();
 
-	nrfx_gppi_channel_endpoints_setup(ppi_radio_start,
-			nrf_egu_event_address_get(RADIO_TEST_EGU, RADIO_TEST_EGU_EVENT),
-			nrf_radio_task_address_get(NRF_RADIO,
-						   rx ? NRF_RADIO_TASK_RXEN : NRF_RADIO_TASK_TXEN));
+	nrfx_gppi_ep_attach(nrf_egu_event_address_get(RADIO_TEST_EGU, RADIO_TEST_EGU_EVENT),
+			    ppi_radio_start);
+	nrfx_gppi_ep_attach(nrf_radio_task_address_get(NRF_RADIO,
+					   rx ? NRF_RADIO_TASK_RXEN : NRF_RADIO_TASK_TXEN),
+			    ppi_radio_start);
 	atomic_set_bit(&endpoint_state, (rx ? ENDPOINT_EGU_RADIO_RX : ENDPOINT_EGU_RADIO_TX));
 
-	nrfx_gppi_fork_endpoint_setup(ppi_radio_start,
-			nrf_timer_task_address_get(timer.p_reg, NRF_TIMER_TASK_START));
+	nrfx_gppi_ep_attach(nrf_timer_task_address_get(timer.p_reg, NRF_TIMER_TASK_START),
+			    ppi_radio_start);
 	atomic_set_bit(&endpoint_state, ENDPOINT_FORK_EGU_TIMER);
 
-	nrfx_gppi_channels_enable(BIT(ppi_radio_start));
+	nrfx_gppi_conn_enable(ppi_radio_start);
 }
 
 static void radio_ppi_tx_reconfigure(void)
 {
-	if (nrfx_gppi_channel_check(ppi_radio_start)) {
-		nrfx_gppi_channels_disable(BIT(ppi_radio_start));
-	}
+	nrfx_gppi_conn_disable(ppi_radio_start);
 
 	endpoints_clear();
 
-	nrfx_gppi_channel_endpoints_setup(ppi_radio_start,
-		nrf_timer_event_address_get(timer.p_reg, NRF_TIMER_EVENT_COMPARE1),
-		nrf_radio_task_address_get(NRF_RADIO, NRF_RADIO_TASK_TXEN));
+	nrfx_gppi_ep_attach(nrf_timer_event_address_get(timer.p_reg, NRF_TIMER_EVENT_COMPARE1),
+			    ppi_radio_start);
+	nrfx_gppi_ep_attach(nrf_radio_task_address_get(NRF_RADIO, NRF_RADIO_TASK_TXEN),
+			    ppi_radio_start);
 	atomic_set_bit(&endpoint_state, ENDPOINT_TIMER_RADIO_TX);
 
-	nrfx_gppi_channels_enable(BIT(ppi_radio_start));
+	nrfx_gppi_conn_enable(ppi_radio_start);
 }
 
 #if CONFIG_FEM
@@ -518,11 +583,12 @@ static void radio_config(nrf_radio_mode_t mode, enum transmit_pattern pattern)
 	nrf_radio_packet_conf_t packet_conf;
 
 	/* Set fast ramp-up time. */
-#if defined(CONFIG_SOC_SERIES_NRF54HX) || defined(CONFIG_SOC_SERIES_NRF54LX)
+#if defined(CONFIG_SOC_SERIES_NRF54H) || defined(CONFIG_SOC_SERIES_NRF54L) || \
+	defined(CONFIG_SOC_SERIES_NRF71)
 	nrf_radio_fast_ramp_up_enable_set(NRF_RADIO, true);
 #else
 	nrf_radio_modecnf0_set(NRF_RADIO, true, RADIO_MODECNF0_DTX_Center);
-#endif /* defined(CONFIG_SOC_SERIES_NRF54HX) || defined(CONFIG_SOC_SERIES_NRF54LX) */
+#endif /* defined(CONFIG_SOC_SERIES_NRF54H) || defined(CONFIG_SOC_SERIES_NRF54L) */
 
 	/* Disable CRC. */
 	nrf_radio_crc_configure(NRF_RADIO, RADIO_CRCCNF_LEN_Disabled,
@@ -755,19 +821,20 @@ static void radio_disable(void)
 		(void)fem_power_down();
 	}
 #endif /* CONFIG_FEM */
-
-	test_is_running = false;
+	if (!sweep_processing) {
+		test_is_running = false;
+	}
 }
 
 static void mltpan_6(nrf_radio_mode_t mode)
 {
-#if defined(NRF54L_SERIES)
+#if defined(NRF54L_SERIES) && CONFIG_HAS_HW_NRF_RADIO_IEEE802154
 	if (mode == NRF_RADIO_MODE_IEEE802154_250KBIT) {
 		*((volatile uint32_t *)0x5008A810) = 2;
 	}
 #else
 	ARG_UNUSED(mode);
-#endif /* defined(NRF54L_SERIES) */
+#endif /* defined(NRF54L_SERIES) && CONFIG_HAS_HW_NRF_RADIO_IEEE802154 */
 }
 
 #if NRF53_ERRATA_117_PRESENT
@@ -799,15 +866,18 @@ static void radio_mode_set(NRF_RADIO_Type *reg, nrf_radio_mode_t mode)
 	mltpan_6(mode);
 }
 
-static void radio_unmodulated_tx_carrier(uint8_t mode, int8_t txpower, uint8_t channel)
+static void radio_unmodulated_tx_carrier_radio_setup(uint8_t mode, int8_t txpower, uint8_t channel,
+						     bool ready_start_short_enable)
 {
 	radio_disable();
 
 	radio_mode_set(NRF_RADIO, mode);
-	nrf_radio_shorts_enable(NRF_RADIO, NRF_RADIO_SHORT_READY_START_MASK);
 	radio_power_set(mode, channel, txpower);
-
 	radio_channel_set(mode, channel);
+
+	if (ready_start_short_enable) {
+		nrf_radio_shorts_enable(NRF_RADIO, NRF_RADIO_SHORT_READY_START_MASK);
+	}
 
 #if CONFIG_FEM
 	(void)fem_configure(false, mode, &fem);
@@ -816,7 +886,11 @@ static void radio_unmodulated_tx_carrier(uint8_t mode, int8_t txpower, uint8_t c
 		radio_ppi_config(false);
 	}
 #endif /* CONFIG_FEM */
+}
 
+static void radio_unmodulated_tx_carrier(uint8_t mode, int8_t txpower, uint8_t channel)
+{
+	radio_unmodulated_tx_carrier_radio_setup(mode, txpower, channel, true);
 	radio_start(false, sweep_processing);
 }
 
@@ -886,9 +960,20 @@ static void radio_rx(uint8_t mode, uint8_t channel, enum transmit_pattern patter
 
 	radio_mode_set(NRF_RADIO, mode);
 
+#if CONFIG_HAS_HW_NRF_RADIO_BLE_CODED
+	if ((mode == NRF_RADIO_MODE_BLE_LR125KBIT) || (mode == NRF_RADIO_MODE_BLE_LR500KBIT)) {
+		nrf_radio_shorts_enable(NRF_RADIO, NRF_RADIO_SHORT_READY_START_MASK |
+							   RADIO_TEST_SHORT_END_DISABLE_MASK |
+							   NRF_RADIO_SHORT_DISABLED_RXEN_MASK);
+	} else {
+		nrf_radio_shorts_enable(NRF_RADIO, NRF_RADIO_SHORT_READY_START_MASK |
+							   NRF_RADIO_SHORT_END_START_MASK);
+	}
+#else
 	nrf_radio_shorts_enable(NRF_RADIO,
-				NRF_RADIO_SHORT_READY_START_MASK |
-				NRF_RADIO_SHORT_END_START_MASK);
+				NRF_RADIO_SHORT_READY_START_MASK | NRF_RADIO_SHORT_END_START_MASK);
+#endif /* CONFIG_HAS_HW_NRF_RADIO_BLE_CODED */
+
 	nrf_radio_packetptr_set(NRF_RADIO, rx_packet);
 
 	radio_config(mode, pattern);
@@ -931,7 +1016,7 @@ static void radio_sweep_start(uint8_t channel, uint32_t delay_ms)
 	nrf_timer_int_disable(timer.p_reg, ~0);
 
 	nrfx_timer_extended_compare(&timer,
-		NRF_TIMER_CC_CHANNEL0,
+		TIMER_CC0_SWEEP_DWELL,
 		nrfx_timer_ms_to_ticks(&timer, delay_ms),
 		(NRF_TIMER_SHORT_COMPARE0_CLEAR_MASK |
 		NRF_TIMER_SHORT_COMPARE0_STOP_MASK),
@@ -988,7 +1073,7 @@ static void radio_modulated_tx_carrier_duty_cycle(uint8_t mode, int8_t txpower,
 	nrf_timer_int_disable(timer.p_reg, ~0);
 
 	nrfx_timer_extended_compare(&timer,
-		NRF_TIMER_CC_CHANNEL1,
+		TIMER_CC1_MOD_TX_DUTY,
 		nrfx_timer_us_to_ticks(&timer, delay_time),
 		NRF_TIMER_SHORT_COMPARE1_CLEAR_MASK,
 		false);
@@ -1001,6 +1086,69 @@ static void radio_modulated_tx_carrier_duty_cycle(uint8_t mode, int8_t txpower,
 	irq_unlock(key);
 }
 
+static void tx_sweep_with_sleep_modulated_timer_setup(const struct radio_test_config *cfg)
+{
+	const uint32_t t_tx_us = cfg->params.tx_sweep_with_sleep_modulated.t_tx_us;
+	const uint32_t t_sleep_us = cfg->params.tx_sweep_with_sleep_modulated.t_sleep_us;
+	const uint32_t total_time_per_channel_us = t_tx_us + t_sleep_us;
+
+	nrf_timer_shorts_disable(timer.p_reg, ~0);
+	nrf_timer_int_disable(timer.p_reg, ~0);
+
+	nrfx_timer_compare(
+		&timer, TIMER_CC0_SWEEP_DWELL,
+		nrfx_timer_us_to_ticks(&timer, RADIO_RAMP_UP_FAST_US + t_tx_us),
+		true);
+
+	nrfx_timer_extended_compare(
+		&timer, TIMER_CC4_SWEEP_DUTY,
+		nrfx_timer_us_to_ticks(&timer, total_time_per_channel_us),
+		NRF_TIMER_SHORT_COMPARE4_CLEAR_MASK, true);
+}
+
+static void radio_tx_sweep_with_sleep_modulated(const struct radio_test_config *cfg)
+{
+	mod_tx_sweep_ch_idx = 0;
+
+	nrfx_timer_disable(&timer);
+	tx_sweep_with_sleep_modulated_timer_setup(cfg);
+
+	sweep_processing = true;
+	radio_modulated_tx_carrier(cfg->mode,
+				   cfg->params.tx_sweep_with_sleep_modulated.txpower,
+				   channel_sequence.sequence_array[mod_tx_sweep_ch_idx],
+				   cfg->params.tx_sweep_with_sleep_modulated.pattern,
+				   0);
+	sweep_processing = false;
+
+	nrfx_timer_enable(&timer);
+}
+
+static void radio_tx_sweep_with_sleep(int8_t txpower, uint16_t t_tx_us, uint16_t t_sleep_us)
+{
+	radio_disable();
+	const uint32_t total_time_per_channel_us = t_tx_us + t_sleep_us;
+
+	current_channel = 0;
+
+	nrfx_timer_disable(&timer);
+	nrf_timer_shorts_disable(timer.p_reg, ~0);
+	nrf_timer_int_disable(timer.p_reg, ~0);
+
+	nrfx_timer_compare(&timer,
+		TIMER_CC0_SWEEP_DWELL,
+		nrfx_timer_us_to_ticks(&timer, t_tx_us + RADIO_RAMP_UP_FAST_US),
+		true);
+
+	nrfx_timer_extended_compare(&timer,
+		TIMER_CC4_SWEEP_DUTY,
+		nrfx_timer_us_to_ticks(&timer, total_time_per_channel_us),
+		NRF_TIMER_SHORT_COMPARE4_CLEAR_MASK,
+		true);
+
+	nrfx_timer_enable(&timer);
+}
+
 void radio_test_start(const struct radio_test_config *config)
 {
 #if CONFIG_FEM
@@ -1008,9 +1156,11 @@ void radio_test_start(const struct radio_test_config *config)
 #endif /* CONFIG_FEM */
 
 	/* Execute nRF54H20 errata 216 workaround */
+#if NRF54H_ERRATA_216_PRESENT
 	if (errata_216_on_wait()) {
 		printk("Failed to send the nRF54H20 errata 216 on request to SysCtrl.\n");
 	}
+#endif /* NRF54H_ERRATA_216_PRESENT */
 
 	switch (config->type) {
 	case UNMODULATED_TX:
@@ -1046,6 +1196,14 @@ void radio_test_start(const struct radio_test_config *config)
 			config->params.modulated_tx_duty_cycle.pattern,
 			config->params.modulated_tx_duty_cycle.duty_cycle);
 		break;
+	case TX_SWEEP_WITH_SLEEP:
+		radio_tx_sweep_with_sleep(config->params.tx_sweep_with_sleep.txpower,
+			config->params.tx_sweep_with_sleep.t_tx_us,
+			config->params.tx_sweep_with_sleep.t_sleep_us);
+		break;
+	case TX_SWEEP_WITH_SLEEP_MODULATED:
+		radio_tx_sweep_with_sleep_modulated(config);
+		break;
 	}
 
 	test_is_running = true;
@@ -1060,16 +1218,15 @@ static void cancel(void)
 
 	sweep_processing = false;
 
-	if (nrfx_gppi_channel_check(ppi_radio_start)) {
-		nrfx_gppi_channels_disable(BIT(ppi_radio_start));
-	}
-
+	nrfx_gppi_conn_disable(ppi_radio_start);
 	endpoints_clear();
 	radio_disable();
 
+#if NRF54H_ERRATA_216_PRESENT
 	if (errata_216_off()) {
 		printk("Failed to send errata HMPAN-216 off.\n");
 	}
+#endif /* NRF54H_ERRATA_216_PRESENT */
 }
 
 void radio_test_cancel(enum radio_test_mode type)
@@ -1133,9 +1290,11 @@ static void rx_timeout_work_handler(struct k_work *work)
 {
 	radio_disable();
 	/* Send off signal for nRF54H20 errata HMPAN-216 */
+#if NRF54H_ERRATA_216_PRESENT
 	if (errata_216_off()) {
 		printk("Failed to send errata HMPAN-216 off\n");
 	}
+#endif /* NRF54H_ERRATA_216_PRESENT */
 	if (rx_timeout_cb != NULL && *rx_timeout_cb != NULL) {
 		(*rx_timeout_cb)();
 	}
@@ -1147,8 +1306,8 @@ static void timer_handler(nrf_timer_event_t event_type, void *context)
 		(const struct radio_test_config *) context;
 
 	if (event_type == NRF_TIMER_EVENT_COMPARE0) { /* sweep test running */
-		uint8_t channel_start;
-		uint8_t channel_end;
+		uint8_t channel_start = 0;
+		uint8_t channel_end = 0;
 
 		if (config->type == TX_SWEEP) {
 			sweep_processing = true;
@@ -1167,6 +1326,38 @@ static void timer_handler(nrf_timer_event_t event_type, void *context)
 
 			channel_start = config->params.rx_sweep.channel_start;
 			channel_end = config->params.rx_sweep.channel_end;
+		} else if (config->type == TX_SWEEP_WITH_SLEEP) {
+
+			sweep_processing = true;
+
+			/* disable radio after tone */
+			radio_unmodulated_tx_carrier_radio_setup(
+				NRF_RADIO_MODE_BLE_1MBIT,
+				config->params.tx_sweep_with_sleep.txpower,
+				channel_sequence.sequence_array[current_channel], false);
+
+			/* set up next channel */
+			channel_start = 0;
+			channel_end = channel_sequence.sequence_length - 1;
+		} else if (config->type == TX_SWEEP_WITH_SLEEP_MODULATED) {
+
+			nrf_radio_task_trigger(NRF_RADIO, NRF_RADIO_TASK_DISABLE);
+			while (!nrf_radio_event_check(NRF_RADIO, NRF_RADIO_EVENT_DISABLED)) {
+				/* Do nothing */
+			}
+			nrf_radio_event_clear(NRF_RADIO, NRF_RADIO_EVENT_DISABLED);
+			nrf_radio_event_clear(NRF_RADIO, NRF_RADIO_EVENT_READY);
+			mod_tx_sweep_ch_idx++;
+
+			if (mod_tx_sweep_ch_idx >
+				  channel_sequence.sequence_length - 1) {
+				mod_tx_sweep_ch_idx = 0;
+			}
+
+			nrf_radio_event_clear(NRF_RADIO, RADIO_TEST_EVENT_END);
+			radio_channel_set(
+				config->mode,
+				channel_sequence.sequence_array[mod_tx_sweep_ch_idx]);
 		} else {
 			printk("Unexpected test type: %d\n", config->type);
 			return;
@@ -1178,8 +1369,16 @@ static void timer_handler(nrf_timer_event_t event_type, void *context)
 		if (current_channel > channel_end) {
 			current_channel = channel_start;
 		}
-	} else if (event_type == NRF_TIMER_EVENT_COMPARE1) { /* HMPAN-216 errata */
+#if NRF54H_ERRATA_216_PRESENT
+	} else if (event_type == NRF_TIMER_EVENT_COMPARE7) { /* HMPAN-216 errata */
 		errata_216_release();
+#endif /* NRF54H_ERRATA_216_PRESENT */
+	} else if (event_type == NRF_TIMER_EVENT_COMPARE4) {
+		if (config->type == TX_SWEEP_WITH_SLEEP_MODULATED) {
+			radio_start(false, false);
+		} else {
+			radio_start(false, true);
+		}
 	} else {
 		/* Do nothing */
 	}
@@ -1187,7 +1386,7 @@ static void timer_handler(nrf_timer_event_t event_type, void *context)
 
 static void timer_init(const struct radio_test_config *config)
 {
-	nrfx_err_t          err;
+	int                 err;
 	nrfx_timer_config_t timer_cfg = {
 		.frequency = NRFX_MHZ_TO_HZ(1),
 		.mode      = NRF_TIMER_MODE_TIMER,
@@ -1196,7 +1395,7 @@ static void timer_init(const struct radio_test_config *config)
 	};
 
 	err = nrfx_timer_init(&timer, &timer_cfg, timer_handler);
-	if (err != NRFX_SUCCESS) {
+	if (err != 0) {
 		printk("nrfx_timer_init failed with: %d\n", err);
 	}
 }
@@ -1204,17 +1403,21 @@ static void timer_init(const struct radio_test_config *config)
 void on_radio_end(const struct radio_test_config *config)
 {
 	tx_packet_cnt++;
-	if (tx_packet_cnt == config->params.modulated_tx.packets_num &&
-	    config->type == MODULATED_TX) {
+	if (config->type == MODULATED_TX &&
+		tx_packet_cnt == config->params.modulated_tx.packets_num) {
 		radio_disable();
+
 		/* Send off signal for nRF54H20 errata HMPAN-216 */
+#if NRF54H_ERRATA_216_PRESENT
 		if (errata_216_off()) {
 			printk("Failed to send errata HMPAN-216 off\n");
 		}
+#endif /* NRF54H_ERRATA_216_PRESENT */
 		config->params.modulated_tx.cb();
 	} else if (cancel_request) {
 		cancel();
-	} else if (config->type == MODULATED_TX) {
+	} else if (config->type == MODULATED_TX ||
+			   config->type == TX_SWEEP_WITH_SLEEP_MODULATED) {
 		nrf_radio_task_trigger(NRF_RADIO, NRF_RADIO_TASK_START);
 	}
 }
@@ -1254,17 +1457,18 @@ void radio_handler(const void *context)
 
 int radio_test_init(struct radio_test_config *config)
 {
-	nrfx_err_t nrfx_err;
+	int nrfx_err;
+	uint32_t rad_domain = nrfx_gppi_domain_id_get((uint32_t)NRF_RADIO);
 
 	timer_init(config);
 	IRQ_CONNECT(RADIO_TEST_TIMER_IRQn, IRQ_PRIO_LOWEST,
-		RADIO_TEST_TIMER_IRQ_HANDLER, NULL, 0);
+		nrfx_timer_irq_handler, &timer, 0);
 
 	irq_connect_dynamic(RADIO_TEST_RADIO_IRQn, IRQ_PRIO_LOWEST, radio_handler, config, 0);
 	irq_enable(RADIO_TEST_RADIO_IRQn);
 
-	nrfx_err = nrfx_gppi_channel_alloc(&ppi_radio_start);
-	if (nrfx_err != NRFX_SUCCESS) {
+	nrfx_err = nrfx_gppi_domain_conn_alloc(rad_domain, rad_domain, &ppi_radio_start);
+	if (nrfx_err != 0) {
 		printk("Failed to allocate gppi channel.\n");
 		return -EFAULT;
 	}
@@ -1273,7 +1477,7 @@ int radio_test_init(struct radio_test_config *config)
 
 #if CONFIG_FEM
 	int err = fem_init(timer.p_reg,
-			   (BIT(NRF_TIMER_CC_CHANNEL2) | BIT(NRF_TIMER_CC_CHANNEL3)));
+			   (BIT(TIMER_CC2_FEM_0) | BIT(TIMER_CC3_FEM_1)));
 
 	if (err) {
 		return err;
@@ -1281,4 +1485,9 @@ int radio_test_init(struct radio_test_config *config)
 #endif /* CONFIG_FEM */
 
 	return 0;
+}
+
+struct radio_test_channel_sequence *radio_test_channel_sequence_get(void)
+{
+	return &channel_sequence;
 }
