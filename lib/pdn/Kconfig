@@ -5,8 +5,9 @@
 #
 
 menuconfig PDN
-	bool "Packet Domain Network library"
+	bool "Packet Domain Network library [DEPRECATED]"
 	depends on NRF_MODEM_LIB && AT_MONITOR
+	select DEPRECATED
 
 if PDN
 
@@ -99,8 +100,7 @@ config PDN_ESM_STRERROR
 	  The table and function take about 2 KB of FLASH.
 
 module=PDN
-module-dep=LOG
 module-str=PDN library
-source "${ZEPHYR_BASE}/subsys/logging/Kconfig.template.log_config"
+source "$(ZEPHYR_BASE)/subsys/logging/Kconfig.template.log_config"
 
 endif # PDN

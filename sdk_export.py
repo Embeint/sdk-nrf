@@ -47,6 +47,7 @@ def export(upstream: pathlib.Path, output: pathlib.Path):
     tree_replace(upstream, output, ["lib", "nrf_modem_lib"])
     tree_replace(upstream, output, ["lib", "pdn"])
     tree_replace(upstream, output, ["modules", "nrfxlib"])
+    tree_replace(upstream, output, ["samples", "bluetooth", "direct_test_mode"])
     tree_replace(upstream, output, ["subsys", "bluetooth", "controller"])
     tree_replace(upstream, output, ["subsys", "bluetooth", "host_extensions"])
     tree_replace(upstream, output, ["subsys", "mpsl"])
@@ -57,6 +58,11 @@ def export(upstream: pathlib.Path, output: pathlib.Path):
     file_delete(output, ["include", "bluetooth", "adv_prov.h"])
     file_delete(output, ["include", "bluetooth", "bt_rpc.h"])
     tree_delete(output, ["include", "bluetooth", "services"])
+    tree_delete(output, ["include", "bluetooth", "fast_pair"])
+    file_delete(output, ["drivers", "serial", "uart_ipc.c"])
+    file_delete(output, ["drivers", "serial", "Kconfig.ipc"])
+    tree_delete(output, ["samples", "bluetooth", "direct_test_mode", "boards"])
+    tree_delete(output, ["samples", "bluetooth", "direct_test_mode", "remote_hci"])
 
     # Files Nordic placed in Zephyr fork instead of ncs
     upstream_zephyr = upstream / ".." / "zephyr"

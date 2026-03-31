@@ -7,6 +7,7 @@
 #include <stddef.h>
 #include <zephyr/net/socket.h>
 #include <zephyr/sys/util.h>
+#include <zephyr/logging/log.h>
 #include <nrf_socket.h>
 
 LOG_MODULE_DECLARE(lte_lc, CONFIG_LTE_LINK_CONTROL_LOG_LEVEL);

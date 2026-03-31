@@ -10,7 +10,7 @@
  
  #include <zephyr/kernel.h>
  
- #include <nrf.h>
+ #include <soc.h>
  
  #include <nrfx_rramc.h>
  

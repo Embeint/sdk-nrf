@@ -2,7 +2,7 @@
 
 config CRACEN_LIB_KMU
 	bool "CRACEN KMU library"
-	depends on SOC_SERIES_NRF54LX
+	depends on SOC_SERIES_NRF54L
 	select NRFX_RRAMC if !BUILD_WITH_TFM
 	default y
 	help
