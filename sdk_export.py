@@ -34,6 +34,7 @@ def export(upstream: pathlib.Path, output: pathlib.Path):
     tree_replace(upstream, output, ["dts", "bindings", "radio_coex"])
     tree_replace(upstream, output, ["dts", "bindings", "mspi"])
     tree_replace(upstream, output, ["include", "bluetooth"])
+    tree_replace(upstream, output, ["include", "fem_al"])
     tree_replace(upstream, output, ["include", "modem"])
     tree_replace(upstream, output, ["include", "mpsl"])
     tree_replace(upstream, output, ["lib", "at_parser"])
