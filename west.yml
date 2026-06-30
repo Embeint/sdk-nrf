@@ -16,3 +16,8 @@ manifest:
       path: modules/crypto/oberon-psa-crypto
       repo-path: sdk-oberon-psa-crypto
       revision: ncs-v3.3.0
+    - name: ncs-edge-ai
+      remote: ncs
+      repo-path: sdk-edge-ai
+      path: modules/nrfconnect/sdk-edge-ai
+      revision: v2.1.0
