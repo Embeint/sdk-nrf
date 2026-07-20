@@ -16,14 +16,15 @@
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(nrf_modem, CONFIG_NRF_MODEM_LIB_LOG_LEVEL);
 
-#if CONFIG_SOC_SERIES_NRF91
+
+#ifdef CONFIG_PARTITION_MANAGER_ENABLED
 #include <pm_config.h>
 #define SHMEM_TX_HEAP_ADDR (PM_NRF_MODEM_LIB_TX_ADDRESS)
 #define SHMEM_TX_HEAP_SIZE (CONFIG_NRF_MODEM_LIB_SHMEM_TX_SIZE)
-#elif CONFIG_SOC_SERIES_NRF92
+#else /* !CONFIG_PARTITION_MANAGER_ENABLED (use Devicetree) */
 #define SHMEM_TX_HEAP_ADDR (DT_REG_ADDR(DT_NODELABEL(cpuapp_cpucell_ipc_shm_heap)))
 #define SHMEM_TX_HEAP_SIZE (DT_REG_SIZE(DT_NODELABEL(cpuapp_cpucell_ipc_shm_heap)))
-#endif
+#endif /* CONFIG_PARTITION_MANAGER_ENABLED */
 
 
 #define UNUSED_FLAGS 0
@@ -247,6 +248,12 @@ void nrf_modem_os_errno_set(int err_code)
 bool nrf_modem_os_is_in_isr(void)
 {
 	return k_is_in_isr();
+}
+
+uintptr_t nrf_modem_os_thread_id_get(void)
+{
+	/* A non-zero thread ID */
+	return (uintptr_t)k_current_get();
 }
 
 static struct k_sem nrf_modem_os_sems[NRF_MODEM_OS_NUM_SEM_REQUIRED];

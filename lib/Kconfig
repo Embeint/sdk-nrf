@@ -14,7 +14,7 @@ rsource "modem_antenna/Kconfig"
 rsource "modem_key_mgmt/Kconfig"
 rsource "multithreading_lock/Kconfig"
 rsource "nrf_modem_lib/Kconfig"
-rsource "pdn/Kconfig"
 rsource "fem_al/Kconfig"
+rsource "dtm_twowire/Kconfig"
 
 endmenu

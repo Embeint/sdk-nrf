@@ -10,12 +10,12 @@ manifest:
       remote: ncs
       repo-path: sdk-nrfxlib
       path: modules/nrfconnect/nrfxlib
-      revision: v3.3.0
+      revision: v3.4.0
     - name: oberon-psa-crypto
       remote: ncs
       path: modules/crypto/oberon-psa-crypto
       repo-path: sdk-oberon-psa-crypto
-      revision: ncs-v3.3.0
+      revision: ncs-v3.4.0
     - name: ncs-edge-ai
       remote: ncs
       repo-path: sdk-edge-ai
