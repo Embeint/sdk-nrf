@@ -7,19 +7,18 @@
 cmake_minimum_required(VERSION 3.20.0)
 
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
-project(wifi_radio_test)
-
-target_include_directories(app PRIVATE inc)
+project(wifi_ble_radio_test)
 
 # NORDIC SDK APP START
 target_sources(app PRIVATE
-  ./src/main.c
-  ./src/radio_cmd.c
-  ./src/radio_test.c
-  ./src/nrf_wifi_radio_test_shell.c
-  ./src/nrf_wifi_radio_ficr_shell.c
-  ./src/ficr_prog.c
+  src/early_shell_start.c
 )
-# NORDIC SDK APP END
 
-target_link_libraries(app PRIVATE nrf-wifi-osal)
+# Include BLE radio test sources only in default mode
+if(NOT CONFIG_SAMPLE_WIFI_RADIO_TEST_WIFI_ONLY)
+  set(perip_rt_dir ${ZEPHYR_NRF_MODULE_DIR}/samples/peripheral/radio_test)
+  file(GLOB perip_rt_sources ${perip_rt_dir}/src/*.c)
+
+  target_sources(app PRIVATE ${perip_rt_sources})
+endif()
+# NORDIC SDK APP END

@@ -45,6 +45,12 @@ struct mpsl_context {
 	/* The flash operation may be split into multiple requests.
 	 * This represents the length of such a request. */
 	uint32_t request_length_us;
+	/* Minimum spacing to enforce between the end of one timeslot and the
+	 * start of the next, requested by nrf_flash_sync_set_delay() to realize
+	 * flash-write throttling. Zero means "next timeslot as early as
+	 * possible".
+	 */
+	uint32_t request_delay_us;
 	/* Argument passed to nrf_flash_sync_exe(). */
 	struct flash_op_desc *op_desc;
 	mpsl_timeslot_request_t timeslot_request;
@@ -57,6 +63,10 @@ struct mpsl_context {
 
 static struct mpsl_context _context;
 
+/* The get_timeslot_time_us() is supported only for nRF52 and nRF53 series. Check for existence
+ * of timer0 node in the device tree is enough to figure out whether the function is supported.
+ */
+#if DT_NODE_EXISTS(DT_NODELABEL(timer0))
 /**
  * Get time in microseconds since the beginning of the timeslot.
  *
@@ -64,20 +74,24 @@ static struct mpsl_context _context;
  */
 static uint32_t get_timeslot_time_us(void)
 {
-#ifdef CONFIG_SOC_COMPATIBLE_NRF54LX
-	nrf_timer_task_trigger(NRF_TIMER10, NRF_TIMER_TASK_CAPTURE0);
-	return nrf_timer_cc_get(NRF_TIMER10, NRF_TIMER_CC_CHANNEL0);
-#elif CONFIG_SOC_NRF54H20
-	/* Unused */
-	return 0;
-#else
-	nrf_timer_task_trigger(NRF_TIMER0, NRF_TIMER_TASK_CAPTURE0);
-	return nrf_timer_cc_get(NRF_TIMER0, NRF_TIMER_CC_CHANNEL0);
-#endif /* CONFIG_SOC_COMPATIBLE_NRF54LX */
+	nrf_timer_task_trigger(MPSL_TIMER0, NRF_TIMER_TASK_CAPTURE0);
+	return nrf_timer_cc_get(MPSL_TIMER0, NRF_TIMER_CC_CHANNEL0);
 }
+#endif /* DT_NODE_EXISTS(DT_NODELABEL(timer0)) */
 
 static void reschedule_next_timeslot(void)
 {
+	/* Fall back to an EARLIEST high-priority request. This fully repopulates
+	 * the request because the throttling path may have left it configured as
+	 * a NORMAL (distance-based) request, whose union layout differs. Dropping
+	 * the throttling delay here is intentional: under scheduling contention
+	 * getting the write done takes precedence over the current-spreading gap.
+	 */
+	_context.timeslot_request.request_type = MPSL_TIMESLOT_REQ_TYPE_EARLIEST;
+	_context.timeslot_request.params.earliest.hfclk =
+		MPSL_TIMESLOT_HFCLK_CFG_NO_GUARANTEE;
+	_context.timeslot_request.params.earliest.length_us =
+		_context.request_length_us + TIMESLOT_LENGTH_SLACK_US;
 	_context.timeslot_request.params.earliest.priority =
 		MPSL_TIMESLOT_PRIORITY_HIGH;
 	_context.timeslot_request.params.earliest.timeout_us =
@@ -107,12 +121,41 @@ timeslot_callback(mpsl_timeslot_session_id_t session_id, uint32_t signal)
 			_context.return_param.callback_action =
 				MPSL_TIMESLOT_SIGNAL_ACTION_END;
 		} else if (rc == FLASH_OP_ONGOING) {
-			/* Reset the priority back to normal after a successful
-			 * timeslot. */
-			_context.timeslot_request.params.earliest.priority =
-				MPSL_TIMESLOT_PRIORITY_NORMAL;
-			_context.timeslot_request.params.earliest.timeout_us =
-				TIMESLOT_TIMEOUT_PRIORITY_NORMAL_US;
+			if (_context.request_delay_us > 0) {
+				/* Throttling: enforce a minimum gap after this
+				 * timeslot before the next one. A NORMAL request
+				 * is the only way to schedule with a start offset
+				 * from within a timeslot; its distance_us is
+				 * measured from the start of the current timeslot,
+				 * so add this timeslot's length to turn the
+				 * requested delay into an end-to-start gap.
+				 */
+				_context.timeslot_request.request_type =
+					MPSL_TIMESLOT_REQ_TYPE_NORMAL;
+				_context.timeslot_request.params.normal.hfclk =
+					MPSL_TIMESLOT_HFCLK_CFG_NO_GUARANTEE;
+				_context.timeslot_request.params.normal.priority =
+					MPSL_TIMESLOT_PRIORITY_NORMAL;
+				_context.timeslot_request.params.normal.length_us =
+					_context.request_length_us + TIMESLOT_LENGTH_SLACK_US;
+				_context.timeslot_request.params.normal.distance_us =
+					_context.request_length_us + TIMESLOT_LENGTH_SLACK_US +
+					_context.request_delay_us;
+			} else {
+				/* Reset the priority back to normal after a
+				 * successful timeslot.
+				 */
+				_context.timeslot_request.request_type =
+					MPSL_TIMESLOT_REQ_TYPE_EARLIEST;
+				_context.timeslot_request.params.earliest.hfclk =
+					MPSL_TIMESLOT_HFCLK_CFG_NO_GUARANTEE;
+				_context.timeslot_request.params.earliest.length_us =
+					_context.request_length_us + TIMESLOT_LENGTH_SLACK_US;
+				_context.timeslot_request.params.earliest.priority =
+					MPSL_TIMESLOT_PRIORITY_NORMAL;
+				_context.timeslot_request.params.earliest.timeout_us =
+					TIMESLOT_TIMEOUT_PRIORITY_NORMAL_US;
+			}
 
 			_context.return_param.callback_action =
 				MPSL_TIMESLOT_SIGNAL_ACTION_REQUEST;
@@ -162,6 +205,11 @@ void nrf_flash_sync_set_context(uint32_t duration)
 	_context.request_length_us = duration;
 }
 
+void nrf_flash_sync_set_delay(uint32_t delay_us)
+{
+	_context.request_delay_us = delay_us;
+}
+
 static bool is_in_fault_isr(void)
 {
 #if defined(CONFIG_ARM)
@@ -208,6 +256,11 @@ int nrf_flash_sync_exe(struct flash_op_desc *op_desc)
 
 	_context.op_desc = op_desc;
 	_context.status = -ETIMEDOUT;
+	/* Start throttling fresh: the first timeslot of an operation must be an
+	 * EARLIEST request, so no inter-timeslot delay applies until the flash
+	 * driver sets one between blocks via nrf_flash_sync_set_delay().
+	 */
+	_context.request_delay_us = 0;
 	atomic_clear(&_context.timeout_occured);
 
 	__ASSERT_NO_MSG(k_sem_count_get(&_context.timeout_sem) == 0);
@@ -246,19 +299,22 @@ void nrf_flash_sync_get_timestamp_begin(void)
 
 bool nrf_flash_sync_check_time_limit(uint32_t iteration)
 {
-#if defined(CONFIG_SOC_COMPATIBLE_NRF54LX) || defined(CONFIG_SOC_NRF54H20)
+#if DT_NODE_EXISTS(DT_NODELABEL(timer0))
+	/* The get_timeslot_time_us() is supported only for nRF52 and nRF53 series. Check for
+	 * existence of timer0 node in the device tree is enough to figure out whether the function
+	 * is supported.
+	 */
+	uint32_t now_us = get_timeslot_time_us();
+	uint32_t time_per_iteration_us = now_us / iteration;
+
+	return now_us + time_per_iteration_us >= _context.request_length_us;
+#else
 	/* The time taken in a previous write is not a predictor of the time taken
 	 * for the next write. Writing the same value as is already stored is much
 	 * faster than writing a different value. If the first few writes are fast
 	 * and the later ones are slow we may get an overstay assert. The configured
 	 * event length is only guaranteed to fit one write block.
 	 */
-
-	(void)get_timeslot_time_us; /* Needed to avoid build time warning: unused static function*/
 	return true;
-#else
-	uint32_t now_us = get_timeslot_time_us();
-	uint32_t time_per_iteration_us = now_us / iteration;
-	return now_us + time_per_iteration_us >= _context.request_length_us;
-#endif /* CONFIG_SOC_COMPATIBLE_NRF54LX || CONFIG_SOC_NRF54H20 */
+#endif /* DT_NODE_EXISTS(DT_NODELABEL(timer0)) */
 }

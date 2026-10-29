@@ -121,12 +121,27 @@ config MPSL_INIT_PRIORITY
 
 config MPSL_FORCE_RRAM_ON_ALL_THE_TIME
 	bool "Force RRAM to stay on"
-	depends on TRUSTED_EXECUTION_NONSECURE
+	depends on BUILD_WITH_TFM && DT_HAS_NORDIC_RRAM_CONTROLLER_ENABLED
 	default y
 	help
 	  This option forces RRAM to stay on.
 	  This is not needed when only basic bluetooth features are used.
 	  Only needed when for example LLPM, Frame space update, ISO or Channel Sounding is used.
+
+config MPSL_LOW_LATENCY_CALLBACKS
+	bool
+	default y if SOC_COMPATIBLE_NRF54LX
+	help
+	  This option enables the use of low latency callbacks implemented in the MPSL subsystem.
+	  These callbacks are used to acquire and release low latency settings to the system when
+	  time-critical code is executed (for example around radio activity).
+
+config MPSL_RRAM_LOW_LATENCY_MODE_IDLE
+	bool "Use RRAM Idle mode during low-latency acquire"
+	depends on MPSL_LOW_LATENCY_CALLBACKS && !NRF_SYS_EVENT_IRQ_LATENCY
+	help
+	  When enabled, RRAM low power mode is set to Idle instead of Standby when MPSL acquires
+	  low latency through the RRAM controller register interface.
 
 module=MPSL
 module-str=MPSL

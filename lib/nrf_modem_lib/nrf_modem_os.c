@@ -16,16 +16,8 @@
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(nrf_modem, CONFIG_NRF_MODEM_LIB_LOG_LEVEL);
 
-
-#ifdef CONFIG_PARTITION_MANAGER_ENABLED
-#include <pm_config.h>
-#define SHMEM_TX_HEAP_ADDR (PM_NRF_MODEM_LIB_TX_ADDRESS)
-#define SHMEM_TX_HEAP_SIZE (CONFIG_NRF_MODEM_LIB_SHMEM_TX_SIZE)
-#else /* !CONFIG_PARTITION_MANAGER_ENABLED (use Devicetree) */
 #define SHMEM_TX_HEAP_ADDR (DT_REG_ADDR(DT_NODELABEL(cpuapp_cpucell_ipc_shm_heap)))
 #define SHMEM_TX_HEAP_SIZE (DT_REG_SIZE(DT_NODELABEL(cpuapp_cpucell_ipc_shm_heap)))
-#endif /* CONFIG_PARTITION_MANAGER_ENABLED */
-
 
 #define UNUSED_FLAGS 0
 #define THREAD_MONITOR_ENTRIES 10
@@ -376,7 +368,7 @@ void *nrf_modem_os_alloc(size_t bytes)
 	extern uint32_t nrf_modem_lib_failed_allocs;
 	void * const addr = k_heap_alloc(&nrf_modem_lib_heap, bytes, K_NO_WAIT);
 
-	if (IS_ENABLED(CONFIG_NRF_MODEM_LIB_MEM_DIAG_ALLOC) && !addr) {
+	if (IS_ENABLED(CONFIG_NRF_MODEM_LIB_MEM_DIAG) && !addr) {
 		nrf_modem_lib_failed_allocs++;
 	}
 
@@ -400,7 +392,7 @@ void *nrf_modem_os_shm_tx_alloc(size_t bytes)
 	void * const addr = k_heap_alloc(&nrf_modem_lib_shmem_heap, bytes, K_NO_WAIT);
 #endif
 
-	if (IS_ENABLED(CONFIG_NRF_MODEM_LIB_MEM_DIAG_ALLOC) && !addr) {
+	if (IS_ENABLED(CONFIG_NRF_MODEM_LIB_MEM_DIAG) && !addr) {
 		nrf_modem_lib_shmem_failed_allocs++;
 	}
 

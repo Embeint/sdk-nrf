@@ -4,6 +4,12 @@
 # SPDX-License-Identifier: LicenseRef-Nordic-5-Clause
 #
 
+config HAS_BT_LL_SOFTDEVICE_SUPPORT
+	bool
+	depends on DT_HAS_NORDIC_BT_HCI_SDC_ENABLED
+	default y if SOC_SERIES_BSIM_NRFXX || SOC_SERIES_NRF52 || SOC_COMPATIBLE_NRF5340_CPUNET || \
+		SOC_NRF54H20_CPURAD || SOC_SERIES_NRF54L || SOC_SERIES_NRF71
+
 config BT_LL_SOFTDEVICE
 	bool "SoftDevice Link Layer"
 	default y
@@ -50,10 +56,8 @@ config BT_LL_SOFTDEVICE
 	select BT_LL_SOFTDEVICE_HEADERS_INCLUDE
 	select MRAM_LATENCY if (SOC_NRF54H20_CPURAD && !MPSL_PM_USE_MRAM_LATENCY_SERVICE)
 	select MRAM_LATENCY_AUTO_REQ if (SOC_NRF54H20_CPURAD && !MPSL_PM_USE_MRAM_LATENCY_SERVICE)
-	select EXPERIMENTAL if SOC_SERIES_BSIM_NRFXX || SOC_NRF54LS05B_CPUAPP
-	depends on (SOC_SERIES_BSIM_NRFXX || SOC_SERIES_NRF52 || SOC_COMPATIBLE_NRF5340_CPUNET ||\
-			    SOC_NRF54H20_CPURAD || SOC_SERIES_NRF54L || SOC_SERIES_NRF71)
-	depends on DT_HAS_NORDIC_BT_HCI_SDC_ENABLED
+	select EXPERIMENTAL if SOC_SERIES_BSIM_NRFXX || SOC_NRF54LV10A_CPUAPP || SOC_NRF54LS05B_CPUAPP
+	depends on HAS_BT_LL_SOFTDEVICE_SUPPORT
 	help
 	  Use SoftDevice Link Layer implementation.
 
@@ -61,6 +65,7 @@ config BT_CTLR_DF_SUPPORT
 	select BT_CTLR_DF_CTE_TX_SUPPORT
 
 if BT_LL_SOFTDEVICE
+
 menu "SoftDevice Controller"
 
 choice BT_LL_SOFTDEVICE_BUILD_TYPE
@@ -83,9 +88,14 @@ config BT_RX_STACK_SIZE
 	default 2600 if BT_MESH
 	default 2200 if BT_SETTINGS
 	default 3200 if BT_SMP && SOC_SERIES_NRF54L
-	default 1536 if BT_SMP
-	default 2048 if !BT_SMP && (SOC_SERIES_NRF54L || SOC_SERIES_NRF54H)
-	default 1024
+	default 1536 if BT_SMP && (SOC_SERIES_BSIM_NRFXX || SOC_SERIES_NRF52 || \
+		SOC_COMPATIBLE_NRF5340_CPUNET || SOC_NRF54H20_CPURAD || \
+		SOC_SERIES_NRF71)
+	default 2048 if !BT_SMP && (SOC_SERIES_NRF54L || SOC_NRF54H20_CPURAD)
+	#default value for all remaining supported series
+	default 1024 if (SOC_SERIES_BSIM_NRFXX || SOC_SERIES_NRF52 || \
+		SOC_COMPATIBLE_NRF5340_CPUNET || SOC_NRF54H20_CPURAD || \
+		SOC_SERIES_NRF71)
 	range 512 65536 if BT_HCI_RAW
 	range 1100 65536 if BT_MESH
 	range 1024 65536
@@ -115,6 +125,17 @@ config BT_CTLR_SDC_QOS_CONN_EVENT_REPORT
 	bool "QoS connection event report"
 	help
 	  Quality of Service connection event report feature support
+
+config BT_CTLR_SDC_LOG
+	bool "SoftDevice Controller logging [EXPERIMENTAL]"
+	depends on SOC_SERIES_NRF54L || SOC_SERIES_BSIM_NRF54LX
+	select MPSL_LOG_HANDLER
+	select EXPERIMENTAL
+	help
+	  Contribute the SoftDevice Controller message table to the shared MPSL
+	  log handler (see MPSL_LOG_HANDLER).
+	  Can be used to simplify debugging of HCI errors or
+	  other kinds of SDC failures.
 
 config BT_CTLR_SDC_ALLOW_PARALLEL_SCANNING_AND_INITIATING
 	bool "Allow scanning and initiating at the same time"
@@ -294,6 +315,18 @@ config BT_CTLR_DF_CONN_CTE_RSP
 	  Enable support for Bluetooth v5.1 Connection CTE Response feature
 	  in controller.
 
+config BT_CTLR_SDC_MPSL_COEX_SUPPORT
+	bool
+	depends on !(BT_CTLR_PHY_CODED && MPSL_FEM && SOC_SERIES_NRF53)
+
+config BT_CTLR_SDC_MPSL_COEX
+	bool "SoftDevice Controller support for MPSL Coex"
+	default y if MPSL_CX
+	select BT_CTLR_SDC_MPSL_COEX_SUPPORT
+	help
+	  Enable support for MPSL Coex in the SoftDevice Controller.
+	  This is not supported with Coded Phy and FEM on the nRF5340 SoC.
+
 # As CONFIG_BT_CTLR_ADV_EXT_PDU_EXTRA_DATA_MEMORY is defined for the Zephyr LL
 # only, and BT_CLTR_DF_ADV_CTE_TX expects it existence, we define it as an empty
 # configuration here.
@@ -303,25 +336,26 @@ config BT_CTLR_ADV_EXT_PDU_EXTRA_DATA_MEMORY
 choice BT_LL_SOFTDEVICE_VARIANT
 	prompt "SoftDevice Controller variant"
 	default BT_LL_SOFTDEVICE_MULTIROLE if ((BT_OBSERVER && BT_BROADCASTER) || \
-						     BT_CTLR_SDC_LLPM || \
-						     BT_CTLR_ADV_EXT || \
-						     BT_CTLR_PHY_CODED || \
-						     BT_CTLR_ADV_PERIODIC || \
-						     BT_CTLR_DF_CTE_TX || \
-						     MPSL_CX || \
-						     BT_CTLR_SYNC_PERIODIC || \
-						     BT_CTLR_SCA_UPDATE || \
-						     BT_CTLR_SUBRATING || \
-						     BT_CTLR_SDC_PAWR_ADV || \
-						     BT_CTLR_SDC_PAWR_SYNC || \
-						     BT_ISO || \
-						     BT_CTLR_CHANNEL_SOUNDING || \
-						     BT_CTLR_EXTENDED_FEAT_SET || \
-						     BT_CTLR_FRAME_SPACE_UPDATE || \
-						     BT_CTLR_SHORTER_CONNECTION_INTERVALS || \
-						     BT_CTLR_LE_FLUSHABLE_ACL_DATA || \
-						     SOC_COMPATIBLE_NRF5340_CPUNET || \
-						     SOC_SERIES_NRF71)
+		BT_CTLR_SDC_LLPM || \
+		BT_CTLR_ADV_EXT || \
+		BT_CTLR_PHY_CODED || \
+		BT_CTLR_ADV_PERIODIC || \
+		BT_CTLR_DF_CTE_TX || \
+		BT_CTLR_SDC_MPSL_COEX || \
+		BT_CTLR_SYNC_PERIODIC || \
+		BT_CTLR_SCA_UPDATE || \
+		BT_CTLR_SUBRATING || \
+		BT_CTLR_SDC_PAWR_ADV || \
+		BT_CTLR_SDC_PAWR_SYNC || \
+		BT_ISO || \
+		BT_CTLR_CHANNEL_SOUNDING || \
+		BT_CTLR_EXTENDED_FEAT_SET || \
+		BT_CTLR_FRAME_SPACE_UPDATE || \
+		BT_CTLR_SHORTER_CONNECTION_INTERVALS || \
+		BT_CTLR_LE_FLUSHABLE_ACL_DATA || \
+		BT_CTLR_SDC_LOG || \
+		SOC_COMPATIBLE_NRF5340_CPUNET || \
+		SOC_SERIES_NRF71)
 	default BT_LL_SOFTDEVICE_CENTRAL if BT_OBSERVER
 	default BT_LL_SOFTDEVICE_PERIPHERAL if BT_BROADCASTER
 	help
@@ -330,6 +364,7 @@ choice BT_LL_SOFTDEVICE_VARIANT
 config BT_LL_SOFTDEVICE_PERIPHERAL
 	bool "SoftDevice Controller peripheral library optimized for peripheral role applications"
 	depends on !BT_OBSERVER && !BT_CTLR_SDC_LLPM && !BT_CTLR_ADV_EXT && !BT_CTLR_PHY_CODED
+	depends on !BT_CTLR_SDC_LOG
 	help
 	  The peripheral library variant is optimized for simpler applications only
 	  requiring the peripheral role.
@@ -337,6 +372,7 @@ config BT_LL_SOFTDEVICE_PERIPHERAL
 config BT_LL_SOFTDEVICE_CENTRAL
 	bool "SoftDevice Controller optimized for central role applications"
 	depends on !BT_BROADCASTER && !BT_CTLR_SDC_LLPM && !BT_CTLR_ADV_EXT && !BT_CTLR_PHY_CODED
+	depends on !BT_CTLR_SDC_LOG
 	help
 	  The central library variant is optimized for simpler applications only
 	  requiring the central role.
@@ -737,21 +773,19 @@ config BT_CTLR_SDC_ENABLE_LOWEST_FRAME_SPACE
 config BT_CTLR_SDC_DATA_RELATED_ADDRESS_CHANGES
 	bool "Data Related Address Changes"
 	depends on BT_BROADCASTER
-	default y if BT_HCI_RAW
 	help
 	  Support for LE Set Data Related Address Changes command
 
 config BT_CTLR_SDC_RF_PATH_COMPENSATION
 	bool "RF Path Compensation"
 	depends on BT_CTLR_LE_POWER_CONTROL || BT_CTLR_ADV_EXT
-	default y if BT_HCI_RAW
 	help
 	  Support for LE RF Path Compensation
 
 config BT_CTLR_SDC_ISO_TEST
 	bool "LE ISO Test commands"
 	depends on BT_CTLR_ISO
-	default y if BT_HCI_RAW || BT_ISO_TEST_PARAMS
+	default y if BT_ISO_TEST_PARAMS
 	help
 	  Support for LE ISO test HCI commands
 
@@ -762,6 +796,31 @@ config BT_CTLR_LE_FLUSHABLE_ACL_DATA
 	help
 	  Enable support for Bluetooth 6.2 LE Flushable ACL Data in the Controller.
 
+config BT_CTLR_CHANNEL_CLASSIFICATION
+	bool "Channel Classification [EXPERIMENTAL]"
+	depends on BT_CONN
+	select EXPERIMENTAL
+	help
+	  Enable support for the Bluetooth Channel Classification feature
+	  in the controller.
+
+config BT_CTLR_DECISION_BASED_ADV_FILTERING
+	bool "Decision Based Advertising Filtering [EXPERIMENTAL]"
+	depends on BT_BROADCASTER || BT_OBSERVER
+	depends on BT_CTLR_ADV_EXT
+	select EXPERIMENTAL
+	help
+	  Enables support for the Bluetooth Decision Based Advertising Filtering
+	  feature in the controller.
+
+config BT_CTLR_SCAN_DECISION_INSTRUCTION_COUNT
+	int "Number of scan decision instructions"
+	depends on BT_CTLR_DECISION_BASED_ADV_FILTERING && BT_OBSERVER
+	range 8 32
+	default 8
+	help
+	  The number of scan decision instructions the controller will support.
+
 config BT_LL_SOFTDEVICE_INIT_PRIORITY
 	int
 	default 53 if MPSL_USE_EXTERNAL_CLOCK_CONTROL
@@ -769,6 +828,12 @@ config BT_LL_SOFTDEVICE_INIT_PRIORITY
 	help
 	  This option configures the LL_SOFTDEVICE initialization priority level. The priority
 	  must be lower than the CONFIG_MPSL_INIT_PRIORITY due to dependency on the MPSL library.
+
+config BT_HCI_SUPPORT_DEPRECATED_COMMANDS
+	bool "Support deprecated HCI commands"
+	help
+	  Enable support for deprecated HCI commands in the SoftDevice Controller, if any.
+	  These may cause deprecation warnings or errors during compilation.
 
 endmenu
 endif  # BT_LL_SOFTDEVICE

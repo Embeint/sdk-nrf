@@ -17,9 +17,11 @@
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/util.h>
 #include <stdbool.h>
+#include <stdlib.h>
 #include <zephyr/sys/__assert.h>
 
 #include <sdc.h>
+#include <sdc_asserts.h>
 #include <sdc_soc.h>
 #include <sdc_hci.h>
 #include <sdc_hci_vs.h>
@@ -191,6 +193,13 @@ BUILD_ASSERT(!IS_ENABLED(CONFIG_BT_PERIPHERAL) ||
 #define SDC_SUBRATING_MEM_SIZE 0
 #endif
 
+#if defined(CONFIG_BT_CTLR_CHANNEL_CLASSIFICATION)
+#define SDC_CHANNEL_CLASSIFICATION_MEM_SIZE \
+	SDC_MEM_CHANNEL_CLASSIFICATION(SDC_CENTRAL_COUNT + PERIPHERAL_COUNT)
+#else
+#define SDC_CHANNEL_CLASSIFICATION_MEM_SIZE 0
+#endif
+
 #if defined(CONFIG_BT_CTLR_SYNC_TRANSFER_RECEIVER) || defined(CONFIG_BT_CTLR_SYNC_TRANSFER_SENDER)
 #define SDC_SYNC_TRANSFER_MEM_SIZE SDC_MEM_SYNC_TRANSFER(SDC_CENTRAL_COUNT + PERIPHERAL_COUNT)
 #else
@@ -293,11 +302,19 @@ BUILD_ASSERT(!IS_ENABLED(CONFIG_BT_PERIPHERAL) ||
 #define SDC_MEM_CS_POOL 0
 #endif
 
+#if defined(CONFIG_BT_CTLR_DECISION_BASED_ADV_FILTERING) && defined(CONFIG_BT_OBSERVER)
+#define SDC_MEM_SCAN_DECISION_INSTRUCTIONS_POOL                                                \
+	SDC_MEM_SCAN_DECISION_INSTRUCTIONS(CONFIG_BT_CTLR_SCAN_DECISION_INSTRUCTION_COUNT)
+#else
+#define SDC_MEM_SCAN_DECISION_INSTRUCTIONS_POOL 0
+#endif
+
 #define MEMPOOL_SIZE ((PERIPHERAL_COUNT * PERIPHERAL_MEM_SIZE) + \
 		      (SDC_CENTRAL_COUNT * CENTRAL_MEM_SIZE) + \
 		      (SDC_ADV_SET_MEM_SIZE) + \
 		      (SDC_LE_POWER_CONTROL_MEM_SIZE) + \
 		      (SDC_SUBRATING_MEM_SIZE) + \
+		      (SDC_CHANNEL_CLASSIFICATION_MEM_SIZE) + \
 		      (SDC_SYNC_TRANSFER_MEM_SIZE) + \
 		      (SDC_FRAME_SPACE_UPDATE_MEM_SIZE) + \
 		      (SDC_SHORTER_CONNECTION_INTERVALS_MEM_SIZE) + \
@@ -316,7 +333,8 @@ BUILD_ASSERT(!IS_ENABLED(CONFIG_BT_PERIPHERAL) ||
 		      (SDC_MEM_BIS_SOURCE) + \
 		      (SDC_MEM_ISO_RX_PDU_POOL) + \
 		      (SDC_MEM_ISO_TX_POOL) + \
-		      (SDC_MEM_CS_POOL))
+		      (SDC_MEM_CS_POOL) + \
+		      (SDC_MEM_SCAN_DECISION_INSTRUCTIONS_POOL))
 
 #if defined(CONFIG_BT_SDC_ADDITIONAL_MEMORY)
 __aligned(8) uint8_t sdc_mempool[MEMPOOL_SIZE + CONFIG_BT_SDC_ADDITIONAL_MEMORY];
@@ -333,6 +351,23 @@ void sdc_assertion_handler(const char *const file, const uint32_t line)
 }
 
 #else /* !IS_ENABLED(CONFIG_BT_CTLR_ASSERT_HANDLER) */
+
+#if defined(CONFIG_LOG)
+const char *sdc_get_assertion_message(const char *const file, const uint32_t line)
+{
+	uint32_t file_id = atoi(file);
+
+	for (uint32_t i = 0; i < ARRAY_SIZE(sdc_assert_messages); i++) {
+		if (sdc_assert_messages[i].file_id == file_id &&
+		    sdc_assert_messages[i].line == line) {
+			return sdc_assert_messages[i].assert_msg;
+		}
+	}
+
+	return NULL;
+}
+#endif /* CONFIG_LOG */
+
 void sdc_assertion_handler(const char *const file, const uint32_t line)
 {
 	volatile char assert_file_id[11] = { 0 };
@@ -341,13 +376,18 @@ void sdc_assertion_handler(const char *const file, const uint32_t line)
 	strncpy((char *)assert_file_id, file, sizeof(assert_file_id) - 1);
 
 #if defined(CONFIG_ASSERT) && defined(CONFIG_ASSERT_VERBOSE) && !defined(CONFIG_ASSERT_NO_MSG_INFO)
-	__ASSERT(false, "SoftDevice Controller ASSERT: %s, %d\n",
+	__ASSERT(false, "SoftDevice Controller ASSERT: %s, 0x%04x\n",
 		(char *)assert_file_id, assert_line);
 #elif defined(CONFIG_LOG)
-	LOG_ERR("SoftDevice Controller ASSERT: %s, %d", (char *)assert_file_id, assert_line);
+	LOG_ERR("SoftDevice Controller ASSERT: %s, 0x%04x", (char *)assert_file_id, assert_line);
+	const char *failure_reason_msg =
+		sdc_get_assertion_message((char *)assert_file_id, assert_line);
+	if (failure_reason_msg) {
+		LOG_ERR("ASSERT REASON: %s", failure_reason_msg);
+	}
 	k_oops();
 #elif defined(CONFIG_PRINTK)
-	printk("SoftDevice Controller ASSERT: %s, %d\n", (char *)assert_file_id, assert_line);
+	printk("SoftDevice Controller ASSERT: %s, 0x%04x\n", (char *)assert_file_id, assert_line);
 	printk("\n");
 	k_oops();
 #else
@@ -507,14 +547,11 @@ static int data_packet_process(const struct device *dev, uint8_t *hci_buf)
 		return -ENOMEM;
 	}
 
-	LOG_DBG("Data: handle (0x%02x), PB(%01d), BC(%01d), len(%u)", handle,
-	       pb, bc, len);
+	LOG_DBG("Data: handle (0x%02x), PB(%01d), BC(%01d), len(%u)", handle, pb, bc, len);
 
-	net_buf_add_mem(data_buf, &hci_buf[0], len + sizeof(*hdr));
+	mpsl_memcpy(net_buf_add(data_buf, len + sizeof(*hdr)), &hci_buf[0], len + sizeof(*hdr));
 
-	struct hci_driver_data *driver_data = dev->data;
-
-	driver_data->recv_func(dev, data_buf);
+	bt_hci_recv(dev, data_buf);
 
 	return 0;
 }
@@ -538,11 +575,9 @@ static int iso_data_packet_process(const struct device *dev, uint8_t *hci_buf)
 		return -ENOMEM;
 	}
 
-	net_buf_add_mem(data_buf, &hci_buf[0], len + sizeof(*hdr));
+	mpsl_memcpy(net_buf_add(data_buf, len + sizeof(*hdr)), &hci_buf[0], len + sizeof(*hdr));
 
-	struct hci_driver_data *driver_data = dev->data;
-
-	(void)driver_data->recv_func(dev, data_buf);
+	bt_hci_recv(dev, data_buf);
 
 	return 0;
 }
@@ -643,11 +678,13 @@ static int event_packet_process(const struct device *dev, uint8_t *hci_buf)
 		return -ENOBUFS;
 	}
 
-	net_buf_add_mem(evt_buf, &hci_buf[0], hdr->len + sizeof(*hdr));
+	/* NOTE: tailroom is not checked, ensure sufficient discardable buffer
+	 *       size is allocated in Kconfig option, CONFIG_BT_BUF_EVT_DISCARDABLE_SIZE.
+	 */
+	mpsl_memcpy(net_buf_add(evt_buf, hdr->len + sizeof(*hdr)), &hci_buf[0],
+		    hdr->len + sizeof(*hdr));
 
-	struct hci_driver_data *driver_data = dev->data;
-
-	(void)driver_data->recv_func(dev, evt_buf);
+	bt_hci_recv(dev, evt_buf);
 
 	return 0;
 }
@@ -858,6 +895,10 @@ static void configure_supported_features(void)
 		sdc_support_qos_channel_survey();
 	}
 
+#if defined(CONFIG_BT_OBSERVER) && defined(CONFIG_BT_CTLR_SDC_CHAN_IDX_IN_ADV_REPORT)
+	sdc_support_chan_idx_in_adv_report();
+#endif
+
 	if (IS_ENABLED(CONFIG_BT_CTLR_SDC_PAWR_ADV)) {
 		sdc_support_le_periodic_adv_with_rsp();
 	}
@@ -899,6 +940,15 @@ static void configure_supported_features(void)
 		}
 	}
 
+	if (IS_ENABLED(CONFIG_BT_CTLR_CHANNEL_CLASSIFICATION)) {
+		if (IS_ENABLED(CONFIG_BT_CENTRAL)) {
+			sdc_support_channel_classification_central();
+		}
+		if (IS_ENABLED(CONFIG_BT_PERIPHERAL)) {
+			sdc_support_channel_classification_peripheral();
+		}
+	}
+
 	if (IS_ENABLED(CONFIG_BT_CTLR_FRAME_SPACE_UPDATE)) {
 		if (IS_ENABLED(CONFIG_BT_CENTRAL)) {
 			sdc_support_frame_space_update_central();
@@ -931,6 +981,16 @@ static void configure_supported_features(void)
 
 	if (IS_ENABLED(CONFIG_BT_CTLR_LE_FLUSHABLE_ACL_DATA)) {
 		sdc_support_flushable_acl_data();
+	}
+
+	if (IS_ENABLED(CONFIG_BT_CTLR_DECISION_BASED_ADV_FILTERING) &&
+	    IS_ENABLED(CONFIG_BT_BROADCASTER)) {
+		sdc_support_decision_adv();
+	}
+
+	if (IS_ENABLED(CONFIG_BT_CTLR_DECISION_BASED_ADV_FILTERING) &&
+	    IS_ENABLED(CONFIG_BT_OBSERVER)) {
+		sdc_support_decision_scan();
 	}
 
 	if (IS_ENABLED(CONFIG_BT_CTLR_CHANNEL_SOUNDING_TEST)) {
@@ -978,6 +1038,14 @@ static void configure_supported_features(void)
 
 	if (IS_ENABLED(CONFIG_BT_CTLR_DTM)) {
 		sdc_support_direct_test_mode();
+	}
+
+	if (IS_ENABLED(CONFIG_MPSL_FEM)) {
+		sdc_support_mpsl_fem();
+	}
+
+	if (IS_ENABLED(CONFIG_BT_CTLR_SDC_MPSL_COEX)) {
+		sdc_support_mpsl_coex();
 	}
 }
 
@@ -1085,6 +1153,17 @@ static int configure_memory_usage(void)
 		return required_memory;
 	}
 #endif /* CONFIG_BT_OBSERVER */
+
+#if defined(CONFIG_BT_CTLR_DECISION_BASED_ADV_FILTERING) && defined(CONFIG_BT_OBSERVER)
+	cfg.scan_decision_instructions_count = CONFIG_BT_CTLR_SCAN_DECISION_INSTRUCTION_COUNT;
+	required_memory = sdc_cfg_set(SDC_DEFAULT_RESOURCE_CFG_TAG,
+				      SDC_CFG_TYPE_SCAN_DECISION_INSTRUCTIONS_COUNT,
+				      &cfg);
+	if (required_memory < 0) {
+		return required_memory;
+	}
+#endif /* CONFIG_BT_CTLR_DECISION_BASED_ADV_FILTERING && CONFIG_BT_OBSERVER */
+
 
 	if (IS_ENABLED(CONFIG_BT_PER_ADV_SYNC)) {
 		cfg.periodic_sync_count.count = SDC_PERIODIC_ADV_SYNC_COUNT;
@@ -1285,7 +1364,7 @@ static int configure_memory_usage(void)
 	return 0;
 }
 
-static int hci_driver_open(const struct device *dev, bt_hci_recv_t recv_func)
+static int hci_driver_open(const struct device *dev)
 {
 	LOG_DBG("Open");
 
@@ -1472,10 +1551,6 @@ static int hci_driver_open(const struct device *dev, bt_hci_recv_t recv_func)
 
 	MULTITHREADING_LOCK_RELEASE();
 
-	struct hci_driver_data *driver_data = dev->data;
-
-	driver_data->recv_func = recv_func;
-
 	bt_buf_rx_freed_cb_set(bt_buf_rx_freed_cb);
 
 	return 0;
@@ -1515,7 +1590,7 @@ static int hci_driver_close(const struct device *dev)
 	return err;
 }
 
-static const struct bt_hci_driver_api hci_driver_api = {
+static DEVICE_API(bt_hci, hci_driver_api) = {
 	.open = hci_driver_open,
 	.close = hci_driver_close,
 	.send = hci_driver_send,
@@ -1537,6 +1612,16 @@ static int hci_driver_init(const struct device *dev)
 		return err;
 	}
 
+	STRUCT_SECTION_FOREACH(hci_internal_user_extension_handler, handler)
+	{
+		if (handler->init) {
+			err = handler->init();
+			if (err) {
+				return err;
+			}
+		}
+	}
+
 	configure_supported_features();
 
 	err = configure_memory_usage();
@@ -1553,7 +1638,7 @@ BUILD_ASSERT(CONFIG_BT_LL_SOFTDEVICE_INIT_PRIORITY > CONFIG_MPSL_INIT_PRIORITY,
 #endif /* CONFIG_MPSL_USE_EXTERNAL_CLOCK_CONTROL */
 
 #define BT_HCI_CONTROLLER_INIT(inst) \
-	static struct hci_driver_data data_##inst; \
+	static struct bt_hci_driver_data data_##inst; \
 	DEVICE_DT_INST_DEFINE(inst, hci_driver_init, NULL, &data_##inst, NULL, POST_KERNEL, \
 			      CONFIG_BT_LL_SOFTDEVICE_INIT_PRIORITY, &hci_driver_api)
 

@@ -9,6 +9,7 @@
 #include <stdint.h>
 
 #include <nrf_errno.h>
+#include <nrf_modem.h>
 #include <nrf_modem_os_rpc.h>
 
 #include <zephyr/cache.h>
@@ -17,9 +18,7 @@
 #include <zephyr/drivers/mbox.h>
 #include <zephyr/ipc/icmsg.h>
 #include <zephyr/ipc/pbuf.h>
-#if defined(CONFIG_IRONSIDE_SE_CALL)
 #include <ironside/se/api.h>
-#endif
 
 #define DCACHE_LINE_SIZE (CONFIG_DCACHE_LINE_SIZE)
 BUILD_ASSERT(DCACHE_LINE_SIZE == 32,
@@ -103,6 +102,11 @@ struct nrf_modem_os_rpc_signal inst_modem_fault;
 struct nrf_modem_os_rpc_signal inst_modem_trace;
 struct nrf_modem_os_rpc_signal inst_modem_sysoff;
 
+/**
+ * Variable to control cellcore ironside start on cold boot.
+ */
+static bool ironside_se_cellcore_is_booted;
+
 uintptr_t nrf_modem_os_rpc_sigdev_app_get(void)
 {
 	const struct device *app_bellboard = DEVICE_DT_GET(DT_NODELABEL(cpuapp_bellboard));
@@ -117,14 +121,17 @@ uintptr_t nrf_modem_os_rpc_sigdev_modem_get(void)
 	return (uintptr_t)modem_bellboard;
 }
 
-int nrf_modem_os_rpc_cellcore_boot(void)
+static int cellcore_boot(uint32_t ipc_buf_addr, uint32_t ipc_buf_size, uint32_t loader_addr)
 {
-#if defined(CONFIG_IRONSIDE_SE_CALL)
+	/* Cpuconf called only on cold boot */
+	if (ironside_se_cellcore_is_booted) {
+		return 0;
+	}
 	struct boot_report_cellcore_ldc params;
 
-	params.ipc_buf_addr = DT_REG_ADDR(DT_NODELABEL(cpuapp_cpucell_ipc_shm_ctrl));
-	params.ipc_buf_size = CONFIG_NRF_MODEM_LIB_SHMEM_CTRL_SIZE;
-	params.loader_addr = 0;
+	params.ipc_buf_addr = ipc_buf_addr;
+	params.ipc_buf_size = ipc_buf_size;
+	params.loader_addr = loader_addr;
 	params.rfu = 0;
 
 	uint8_t *msg = (uint8_t *)&params;
@@ -133,17 +140,30 @@ int nrf_modem_os_rpc_cellcore_boot(void)
 	bool cpu_wait = false;
 
 	/* TODO: Replace hardcoded value when a define is available. */
-	return ironside_se_cpuconf(4, NULL, cpu_wait, msg, msg_size);
-#else
-	/* Without IronSide SE, cellcore is booted by the SDFW. */
-	return 0;
-#endif
+	int ret = ironside_se_cpuconf(4, NULL, cpu_wait, msg, msg_size);
+
+	if (ret == 0) {
+		ironside_se_cellcore_is_booted = true;
+	}
+	return ret;
+}
+
+int nrf_modem_os_rpc_cellcore_boot(void)
+{
+	return cellcore_boot(DT_REG_ADDR(DT_NODELABEL(cpuapp_cpucell_ipc_shm_ctrl)),
+			     DT_REG_SIZE(DT_NODELABEL(cpuapp_cpucell_ipc_shm_ctrl)), 0);
+}
+
+int nrf_modem_os_rpc_cellcore_boot_bootloader(uint32_t loader_addr)
+{
+	return cellcore_boot(loader_addr, NRF_MODEM_SHMEM_BOOTLOADER_SIZE, loader_addr);
 }
 
 static inline void pbuf_configure(struct pbuf_cfg *pb_cfg, uintptr_t mem_addr, size_t size)
 {
-	const uint32_t wr_idx_offset = MAX(pb_cfg->dcache_alignment, _PBUF_IDX_SIZE);
+	const uint32_t wr_idx_offset = MAX(pb_cfg->dcache_alignment, 2 * _PBUF_IDX_SIZE);
 
+	pb_cfg->handshake_loc = (uint32_t *)((uint8_t *)mem_addr + _PBUF_IDX_SIZE);
 	pb_cfg->rd_idx_loc = (uint32_t *)(mem_addr);
 	pb_cfg->wr_idx_loc = (uint32_t *)(mem_addr + wr_idx_offset);
 	pb_cfg->len = (uint32_t)((uint32_t)size - wr_idx_offset - _PBUF_IDX_SIZE);
@@ -164,8 +184,8 @@ int nrf_modem_os_rpc_open(struct nrf_modem_os_rpc *instance,
 	instance->conf.mbox_rx.dev = (struct device *)config->rx.sigdev;
 	instance->conf.mbox_tx.channel_id = config->tx.ch;
 	instance->conf.mbox_rx.channel_id = config->rx.ch;
-	instance->conf.unbound_mode = ICMSG_UNBOUND_MODE_DISABLE;
-
+	instance->conf.unbound_mode = ICMSG_UNBOUND_MODE_ENABLE;
+	instance->cb.unbound = config->cb.unbound;
 	instance->cb.bound = config->cb.bound;
 	instance->cb.received = config->cb.received;
 

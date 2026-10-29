@@ -185,10 +185,15 @@ static void req_pin_set(struct lpuart_data *data)
  */
 static void req_pin_arm(struct lpuart_data *data)
 {
+	const nrf_gpio_pin_dir_t dir = NRF_GPIO_PIN_DIR_INPUT;
+	const nrf_gpio_pin_input_t input = NRF_GPIO_PIN_INPUT_CONNECT;
 	const nrf_gpio_pin_pull_t pull = NRF_GPIO_PIN_PULLUP;
 
-	/* Add pull up before reconfiguring to input. */
-	nrf_gpio_reconfigure(data->req_pin, NULL, NULL, &pull, NULL, NULL);
+	/* Reconfigure to input with pull up so that low state detection (SENSE)
+	 * used by GPIOTE can work. The input buffer must be connected, otherwise
+	 * on some SoCs SENSE never triggers.
+	 */
+	nrf_gpio_reconfigure(data->req_pin, &dir, &input, &pull, NULL, NULL);
 
 	nrfx_gpiote_trigger_enable(get_gpiote(data->req_pin), data->req_pin, true);
 }
@@ -354,11 +359,19 @@ static void deactivate_rx(struct lpuart_data *data)
 	int err;
 
 	if (IS_ENABLED(CONFIG_NRF_SW_LPUART_HFXO_ON_RX)) {
+#if defined(CONFIG_CLOCK_CONTROL_NRF)
 		struct onoff_manager *mgr =
 		     z_nrf_clock_control_get_onoff(CLOCK_CONTROL_NRF_SUBSYS_HF);
 
 		err = onoff_cancel_or_release(mgr, &data->rx_clk_cli);
 		__ASSERT_NO_MSG(err >= 0);
+#else
+		const struct device *dev = DEVICE_DT_GET_ONE(COND_CODE_1(NRF_CLOCK_HAS_HFCLK,
+								(nordic_nrf_clock_hfclk),
+								(nordic_nrf_clock_xo)));
+		err = nrf_clock_control_cancel_or_release(dev, NULL, &data->rx_clk_cli);
+		__ASSERT_NO_MSG(err >= 0);
+#endif
 	}
 
 	/* abort rx */
@@ -413,6 +426,7 @@ static void rx_hfclk_callback(struct onoff_manager *mgr,
 
 static void rx_hfclk_request(struct lpuart_data *data)
 {
+#if defined(CONFIG_CLOCK_CONTROL_NRF)
 	struct onoff_manager *mgr =
 		z_nrf_clock_control_get_onoff(CLOCK_CONTROL_NRF_SUBSYS_HF);
 	int err;
@@ -420,6 +434,16 @@ static void rx_hfclk_request(struct lpuart_data *data)
 	sys_notify_init_callback(&data->rx_clk_cli.notify, rx_hfclk_callback);
 	err = onoff_request(mgr, &data->rx_clk_cli);
 	__ASSERT_NO_MSG(err >= 0);
+#else
+	const struct device *dev = DEVICE_DT_GET_ONE(COND_CODE_1(NRF_CLOCK_HAS_HFCLK,
+							(nordic_nrf_clock_hfclk),
+							(nordic_nrf_clock_xo)));
+	int err;
+
+	sys_notify_init_callback(&data->rx_clk_cli.notify, rx_hfclk_callback);
+	err = nrf_clock_control_request(dev, NULL, &data->rx_clk_cli);
+	__ASSERT_NO_MSG(err >= 0);
+#endif
 }
 
 static void start_rx_activation(struct lpuart_data *data)
@@ -1037,9 +1061,9 @@ static int api_irq_is_pending(const struct device *dev)
 	return api_irq_rx_ready(dev) || api_irq_tx_ready(dev);
 }
 
-static int api_irq_update(const struct device *dev)
+static void api_irq_update(const struct device *dev)
 {
-	return 1;
+	ARG_UNUSED(dev);
 }
 
 #endif /* CONFIG_NRF_SW_LPUART_INT_DRIVEN */
@@ -1160,7 +1184,7 @@ static const struct lpuart_config lpuart_config = {
 
 static struct lpuart_data lpuart_data;
 
-static const struct uart_driver_api lpuart_api = {
+static DEVICE_API(uart, lpuart_driver_api) = {
 	.callback_set = api_callback_set,
 	.tx = api_tx,
 	.tx_abort = api_tx_abort,
@@ -1227,4 +1251,4 @@ DT_FOREACH_STATUS_OKAY(nordic_nrf_gpio, CHECK_GPIOTE_AVAILABLE)
 DEVICE_DT_DEFINE(DT_NODELABEL(lpuart), lpuart_init, NULL,
 	      &lpuart_data, &lpuart_config,
 	      POST_KERNEL, CONFIG_NRF_SW_LPUART_INIT_PRIORITY,
-	      &lpuart_api);
+	      &lpuart_driver_api);

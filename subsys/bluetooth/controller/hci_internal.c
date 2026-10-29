@@ -34,9 +34,9 @@ static struct
 	uint8_t raw_event[BT_BUF_EVT_RX_SIZE];
 } cmd_complete_or_status;
 
-#if defined(CONFIG_BT_CTLR_SDC_PAWR_SYNC)
-static bool padv_response_data_cmd_pending;
-#endif
+#if defined(CONFIG_BT_HCI_ACL_FLOW_CONTROL)
+static uint8_t num_completed_packet_command_status;
+#endif /* CONFIG_BT_HCI_ACL_FLOW_CONTROL */
 
 static hci_internal_user_cmd_handler_t user_cmd_handler;
 
@@ -86,6 +86,9 @@ static bool command_generates_command_complete_event(uint16_t hci_opcode)
 #if defined(CONFIG_BT_CTLR_SHORTER_CONNECTION_INTERVALS)
 	case SDC_HCI_OPCODE_CMD_LE_CONN_RATE_REQUEST:
 #endif /* CONFIG_BT_CTLR_SHORTER_CONNECTION_INTERVALS */
+#if defined(CONFIG_BT_CTLR_CHANNEL_CLASSIFICATION)
+	case SDC_HCI_OPCODE_CMD_VS_CHANNEL_REPORTING_ENABLE:
+#endif /* CONFIG_BT_CTLR_CHANNEL_CLASSIFICATION */
 		return false;
 	default:
 		return true;
@@ -417,7 +420,8 @@ void hci_internal_supported_commands(sdc_hci_ip_supported_commands_t *cmds)
 	cmds->hci_le_connection_update = 1;
 #endif
 
-#if defined(CONFIG_BT_CENTRAL) || defined(CONFIG_BT_CTLR_ADV_EXT)
+#if defined(CONFIG_BT_CENTRAL) || defined(CONFIG_BT_CTLR_ADV_EXT) ||                               \
+	defined(CONFIG_BT_CTLR_CHANNEL_CLASSIFICATION)
 	cmds->hci_le_set_host_channel_classification = 1;
 #endif
 
@@ -678,6 +682,8 @@ void hci_internal_supported_commands(sdc_hci_ip_supported_commands_t *cmds)
 	cmds->hci_le_cs_read_remote_supported_capabilities = 1;
 	cmds->hci_le_cs_write_cached_remote_supported_capabilities = 1;
 	cmds->hci_le_cs_write_cached_remote_supported_capabilities_v2 = 1;
+	cmds->hci_le_cs_set_security_requirements = 1;
+	cmds->hci_le_cs_set_default_security_requirements = 1;
 #if defined(CONFIG_BT_CTLR_CHANNEL_SOUNDING_TEST)
 	cmds->hci_le_cs_test = 1;
 	cmds->hci_le_cs_test_end = 1;
@@ -709,6 +715,19 @@ void hci_internal_supported_commands(sdc_hci_ip_supported_commands_t *cmds)
 	cmds->hci_read_automatic_flush_timeout = 1;
 	cmds->hci_write_automatic_flush_timeout = 1;
 #endif /* CONFIG_BT_CTLR_LE_FLUSHABLE_ACL_DATA */
+
+#if defined(CONFIG_BT_CTLR_CHANNEL_CLASSIFICATION)
+	cmds->hci_read_afh_channel_assessment_mode = 1;
+	cmds->hci_write_afh_channel_assessment_mode = 1;
+#endif
+
+#if defined(CONFIG_BT_CTLR_DECISION_BASED_ADV_FILTERING) && defined(CONFIG_BT_BROADCASTER)
+	cmds->hci_le_set_decision_data = 1;
+#endif
+
+#if defined(CONFIG_BT_CTLR_DECISION_BASED_ADV_FILTERING) && defined(CONFIG_BT_OBSERVER)
+	cmds->hci_le_set_decision_instructions = 1;
+#endif
 }
 
 #if defined(CONFIG_BT_HCI_VS)
@@ -792,7 +811,7 @@ static void le_read_supported_states(uint8_t *buf)
 #endif
 #if defined(CONFIG_BT_CENTRAL)
 	states1 |= ST_MAS;
-	states2 |= ST_MAS;
+	states2 |= ST_MAS2;
 #else
 	states1 &= ~ST_MAS;
 	states2 &= ~ST_MAS2;
@@ -803,9 +822,8 @@ static void le_read_supported_states(uint8_t *buf)
 #else
 	states1 &= ~ST_SCA_INI;
 #endif
-
-	*buf = states1;
-	*(buf + 4) = states2;
+	sys_put_le32(states1, &buf[0]);
+	sys_put_le32(states2, &buf[4]);
 }
 
 int hci_internal_user_cmd_handler_register(const hci_internal_user_cmd_handler_t handler)
@@ -862,8 +880,6 @@ static uint8_t controller_and_baseband_cmd_put(uint8_t const * const cmd,
 		return sdc_hci_cmd_cb_set_controller_to_host_flow_control((void *)cmd_params);
 	case SDC_HCI_OPCODE_CMD_CB_HOST_BUFFER_SIZE:
 		return sdc_hci_cmd_cb_host_buffer_size_wrapper((void *)cmd_params);
-	case SDC_HCI_OPCODE_CMD_CB_HOST_NUMBER_OF_COMPLETED_PACKETS:
-		return sdc_hci_cmd_cb_host_number_of_completed_packets((void *)cmd_params);
 #endif
 
 #if defined(CONFIG_BT_CTLR_LE_ENC) && defined(CONFIG_BT_CTLR_LE_PING)
@@ -891,6 +907,15 @@ static uint8_t controller_and_baseband_cmd_put(uint8_t const * const cmd,
 		*param_length_out += sizeof(sdc_hci_cmd_cb_write_automatic_flush_timeout_return_t);
 		return sdc_hci_cmd_cb_write_automatic_flush_timeout((void *)cmd_params,
 								    (void *)event_out_params);
+#endif
+
+#if defined(CONFIG_BT_CTLR_CHANNEL_CLASSIFICATION)
+	case SDC_HCI_OPCODE_CMD_CB_READ_AFH_CHANNEL_ASSESSMENT_MODE:
+		*param_length_out +=
+			sizeof(sdc_hci_cmd_cb_read_afh_channel_assessment_mode_return_t);
+		return sdc_hci_cmd_cb_read_afh_channel_assessment_mode((void *)event_out_params);
+	case SDC_HCI_OPCODE_CMD_CB_WRITE_AFH_CHANNEL_ASSESSMENT_MODE:
+		return sdc_hci_cmd_cb_write_afh_channel_assessment_mode((void *)cmd_params);
 #endif
 
 	default:
@@ -1034,7 +1059,8 @@ static uint8_t le_controller_cmd_put(uint8_t const * const cmd,
 		return sdc_hci_cmd_le_conn_update((void *)cmd_params);
 #endif
 
-#if defined(CONFIG_BT_CENTRAL) || defined(CONFIG_BT_CTLR_ADV_EXT)
+#if defined(CONFIG_BT_CENTRAL) || defined(CONFIG_BT_CTLR_ADV_EXT) ||                               \
+	defined(CONFIG_BT_CTLR_CHANNEL_CLASSIFICATION)
 	case SDC_HCI_OPCODE_CMD_LE_SET_HOST_CHANNEL_CLASSIFICATION:
 		return sdc_hci_cmd_le_set_host_channel_classification((void *)cmd_params);
 #endif
@@ -1545,6 +1571,16 @@ static uint8_t le_controller_cmd_put(uint8_t const * const cmd,
 		return sdc_hci_cmd_le_subrate_request((void *)cmd_params);
 #endif /* CONFIG_BT_CTLR_SUBRATING */
 
+#if defined(CONFIG_BT_CTLR_DECISION_BASED_ADV_FILTERING) && defined(CONFIG_BT_BROADCASTER)
+	case SDC_HCI_OPCODE_CMD_LE_SET_DECISION_DATA:
+		return sdc_hci_cmd_le_set_decision_data((void *)cmd_params);
+#endif
+
+#if defined(CONFIG_BT_CTLR_DECISION_BASED_ADV_FILTERING) && defined(CONFIG_BT_OBSERVER)
+	case SDC_HCI_OPCODE_CMD_LE_SET_DECISION_INSTRUCTIONS:
+		return sdc_hci_cmd_le_set_decision_instructions((void *)cmd_params);
+#endif
+
 #if defined(CONFIG_BT_CTLR_CHANNEL_SOUNDING)
 	case SDC_HCI_OPCODE_CMD_LE_CS_READ_LOCAL_SUPPORTED_CAPABILITIES:
 		*param_length_out +=
@@ -1595,6 +1631,13 @@ static uint8_t le_controller_cmd_put(uint8_t const * const cmd,
 			sdc_hci_cmd_le_cs_write_cached_remote_supported_capabilities_v2_return_t);
 		return sdc_hci_cmd_le_cs_write_cached_remote_supported_capabilities_v2(
 			(void *)cmd_params, (void *)event_out_params);
+	case SDC_HCI_OPCODE_CMD_LE_CS_SET_SECURITY_REQUIREMENTS:
+		*param_length_out += sizeof(
+			sdc_hci_cmd_le_cs_set_security_requirements_return_t);
+		return sdc_hci_cmd_le_cs_set_security_requirements(
+			(void *)cmd_params, (void *)event_out_params);
+	case SDC_HCI_OPCODE_CMD_LE_CS_SET_DEFAULT_SECURITY_REQUIREMENTS:
+		return sdc_hci_cmd_le_cs_set_default_security_requirements((void *)cmd_params);
 #if defined(CONFIG_BT_CTLR_CHANNEL_SOUNDING_TEST)
 	case SDC_HCI_OPCODE_CMD_LE_CS_TEST:
 		return sdc_hci_cmd_le_cs_test((void *)cmd_params);
@@ -1822,15 +1865,30 @@ static uint8_t vs_cmd_put(uint8_t const *const cmd, uint8_t *const raw_event_out
 		return sdc_hci_cmd_vs_conn_anchor_point_update_event_report_enable(
 		(sdc_hci_cmd_vs_conn_anchor_point_update_event_report_enable_t const *)cmd_params);
 #endif
+#if defined(CONFIG_BT_CTLR_CHANNEL_CLASSIFICATION) && defined(CONFIG_BT_CENTRAL)
+	case SDC_HCI_OPCODE_CMD_VS_CHANNEL_REPORTING_ENABLE:
+		return sdc_hci_cmd_vs_channel_reporting_enable(
+			(sdc_hci_cmd_vs_channel_reporting_enable_t const *)cmd_params);
+#endif
 #if defined(CONFIG_BT_PER_ADV)
 	case SDC_HCI_OPCODE_CMD_VS_ENABLE_PERIODIC_ADV_EVENT_COUNTER_REPORTS:
 		return sdc_hci_cmd_vs_enable_periodic_adv_event_counter_reports(
 		(sdc_hci_cmd_vs_enable_periodic_adv_event_counter_reports_t const *)cmd_params);
 #endif
 #if defined(CONFIG_BT_CTLR_DTM_HCI)
+#if defined(CONFIG_BT_HCI_SUPPORT_DEPRECATED_COMMANDS)
 	case SDC_HCI_OPCODE_CMD_VS_TRANSMITTER_CARRIER_TEST:
+		/* This command is deprecated and will be removed in the future.
+		 * Use the Transmitter Carrier Test subcommand of the VS DTM command instead.
+		 */
 		return sdc_hci_cmd_vs_transmitter_carrier_test(
-		(sdc_hci_cmd_vs_transmitter_carrier_test_t const *)cmd_params);
+			(sdc_hci_cmd_vs_transmitter_carrier_test_t const *)cmd_params);
+#endif /* CONFIG_BT_HCI_SUPPORT_DEPRECATED_COMMANDS */
+	case SDC_HCI_OPCODE_CMD_VS_DTM_COMMAND:
+		return sdc_hci_cmd_vs_dtm_command(
+			(sdc_hci_cmd_vs_dtm_command_t const *)cmd_params,
+			event_out_params,
+			param_length_out);
 #endif
 	default:
 		return BT_HCI_ERR_UNKNOWN_CMD;
@@ -1853,6 +1911,17 @@ static void cmd_put(uint8_t *cmd_in, uint8_t * const raw_event_out)
 					  raw_event_out,
 					  &return_param_length,
 					  &generate_command_status_event);
+	}
+
+	STRUCT_SECTION_FOREACH(hci_internal_user_extension_handler, handler)
+	{
+		if (handler->hci_handler) {
+			status = handler->hci_handler(cmd_in, raw_event_out, &return_param_length,
+						      &generate_command_status_event);
+			if (status != BT_HCI_ERR_UNKNOWN_CMD) {
+				break;
+			}
+		}
 	}
 
 	if (status == BT_HCI_ERR_UNKNOWN_CMD) {
@@ -1910,11 +1979,24 @@ int hci_internal_cmd_put(uint8_t *cmd_in)
 {
 	uint16_t opcode = sys_get_le16(cmd_in);
 
-	if (cmd_complete_or_status.occurred
-#if defined(CONFIG_BT_CTLR_SDC_PAWR_SYNC)
-		|| padv_response_data_cmd_pending
-#endif
-		) {
+#if defined(CONFIG_BT_HCI_ACL_FLOW_CONTROL)
+	if (opcode == SDC_HCI_OPCODE_CMD_CB_HOST_NUMBER_OF_COMPLETED_PACKETS) {
+		if (num_completed_packet_command_status != 0) {
+			/* Previous command returned error, still
+			 * waiting for command complete to be raised
+			 */
+			return -NRF_EPERM;
+		}
+
+		uint8_t status = sdc_hci_cmd_cb_host_number_of_completed_packets(
+			(void *)&cmd_in[BT_HCI_CMD_HDR_SIZE]);
+
+		num_completed_packet_command_status = status;
+		return 0;
+	}
+#endif /* CONFIG_BT_HCI_ACL_FLOW_CONTROL */
+
+	if (cmd_complete_or_status.occurred) {
 		return -NRF_EPERM;
 	}
 
@@ -1931,36 +2013,26 @@ int hci_internal_cmd_put(uint8_t *cmd_in)
 
 	cmd_complete_or_status.occurred = true;
 
-#if defined(CONFIG_BT_HCI_ACL_FLOW_CONTROL)
-	if (opcode == SDC_HCI_OPCODE_CMD_CB_HOST_NUMBER_OF_COMPLETED_PACKETS
-	    &&
-	    cmd_complete_or_status.raw_event[CMD_COMPLETE_MIN_SIZE - 1] == 0) {
-		/* SDC_HCI_OPCODE_CMD_CB_HOST_NUMBER_OF_COMPLETED_PACKETS will only generate
-		 *  command complete if it fails.
-		 */
-
-		cmd_complete_or_status.occurred = false;
-	}
-#endif
-
-#if defined(CONFIG_BT_CTLR_SDC_PAWR_SYNC)
-	if (opcode == SDC_HCI_OPCODE_CMD_LE_SET_PERIODIC_ADV_RESPONSE_DATA
-		&&
-		cmd_complete_or_status.raw_event[0] == BT_HCI_EVT_CMD_COMPLETE) {
-		/* SDC_HCI_OPCODE_CMD_LE_SET_PERIODIC_ADV_RESPONSE_DATA
-		 * will generate command complete at a later time (unless unsupported)
-		 */
-
-		cmd_complete_or_status.occurred = false;
-		padv_response_data_cmd_pending = true;
-	}
-#endif
-
 	return 0;
 }
 
 int hci_internal_msg_get(uint8_t *msg_out, sdc_hci_msg_type_t *msg_type_out)
 {
+#if defined(CONFIG_BT_HCI_ACL_FLOW_CONTROL)
+	if (num_completed_packet_command_status != 0) {
+		*msg_type_out = SDC_HCI_MSG_TYPE_EVT;
+		uint8_t param_length = sizeof(struct bt_hci_evt_cmd_complete)
+							+ sizeof(struct bt_hci_evt_cc_status);
+		encode_command_complete_header(msg_out,
+			SDC_HCI_OPCODE_CMD_CB_HOST_NUMBER_OF_COMPLETED_PACKETS,
+			param_length,
+			num_completed_packet_command_status);
+
+		num_completed_packet_command_status = 0;
+		return 0;
+	}
+#endif /* CONFIG_BT_HCI_ACL_FLOW_CONTROL */
+
 	if (cmd_complete_or_status.occurred) {
 		struct bt_hci_evt_hdr *evt_hdr = (void *)&cmd_complete_or_status.raw_event[0];
 
@@ -1975,13 +2047,6 @@ int hci_internal_msg_get(uint8_t *msg_out, sdc_hci_msg_type_t *msg_type_out)
 	}
 
 	const int retval = sdc_hci_get(msg_out, (uint8_t *)msg_type_out);
-
-#if defined(CONFIG_BT_CTLR_SDC_PAWR_SYNC)
-	if (retval == 0 && *msg_type_out == SDC_HCI_MSG_TYPE_EVT
-		&& msg_out[0] == BT_HCI_EVT_CMD_COMPLETE) {
-		padv_response_data_cmd_pending = false;
-	}
-#endif
 
 	return retval;
 }

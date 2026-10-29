@@ -18,10 +18,6 @@
 
 #include <mpsl_fem_config_common.h>
 #include <mpsl_fem_protocol_api.h>
-#if defined(CONFIG_MPSL_FEM_NRF2220_TEMPERATURE_COMPENSATION) && \
-	!defined(CONFIG_MPSL_FEM_NRF2220_TEMPERATURE_COMPENSATION_WITH_MPSL_SCHEDULER)
-#include <protocol/mpsl_fem_nrf2220_protocol_api.h>
-#endif
 
 #include "fem_al/fem_al.h"
 #include "fem_interface.h"
@@ -189,15 +185,6 @@ int fem_tx_configure(uint32_t ramp_up_time)
 	int32_t err;
 
 	fem_activate_event.event.timer.counter_period.end = ramp_up_time;
-
-#if defined(CONFIG_MPSL_FEM_NRF2220_TEMPERATURE_COMPENSATION) && \
-	!defined(CONFIG_MPSL_FEM_NRF2220_TEMPERATURE_COMPENSATION_WITH_MPSL_SCHEDULER)
-	err = mpsl_fem_nrf2220_temperature_changed_update_now();
-	if (err) {
-		printk("mpsl_fem_nrf2220_temperature_changed_update_now failed (err %d)\n", err);
-		return -EFAULT;
-	}
-#endif
 
 	mpsl_fem_enable();
 	err = mpsl_fem_pa_configuration_set(&fem_activate_event, &fem_deactivate_evt);
@@ -415,6 +402,11 @@ int fem_init(NRF_TIMER_Type *timer_instance, uint8_t compare_channel_mask)
 	NRF52_CONFIGURATION_256_PRESENT || NRF52_CONFIGURATION_257_PRESENT)
 static void apply_fem_errata_25X(nrf_radio_mode_t mode)
 {
+	if (!nrf52_configuration_254() && !nrf52_configuration_255() &&
+	    !nrf52_configuration_256() && !nrf52_configuration_257()) {
+		return;
+	}
+
 	static uint8_t old_mode = NRF_RADIO_MODE_NRF_1MBIT;
 
 	if (*(volatile uint32_t *) 0x10000330UL != 0xFFFFFFFFUL) {
@@ -454,8 +446,5 @@ static void apply_fem_errata_25X(nrf_radio_mode_t mode)
 
 void fem_errata_25X(nrf_radio_mode_t mode)
 {
-	if (nrf52_configuration_254() || nrf52_configuration_255() ||
-	    nrf52_configuration_256() || nrf52_configuration_257()) {
-		apply_fem_errata_25X(mode);
-	}
+	apply_fem_errata_25X(mode);
 }

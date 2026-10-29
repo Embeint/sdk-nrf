@@ -11,21 +11,34 @@
 #include <zephyr/sys/__assert.h>
 #include <zephyr/drivers/clock_control/nrf_clock_control.h>
 #include <mpsl.h>
+#include <mpsl_asserts.h>
 #include <mpsl_timeslot.h>
 #include <mpsl/mpsl_assert.h>
 #include <mpsl/mpsl_work.h>
 #include "multithreading_lock.h"
 #include <nrfx.h>
-#if defined(NRF_TRUSTZONE_NONSECURE)
+#include <stdlib.h>
+#if defined(CONFIG_MPSL_FORCE_RRAM_ON_ALL_THE_TIME)
 #include "tfm_platform_api.h"
 #include "tfm_ioctl_core_api.h"
 #endif
-#if IS_ENABLED(CONFIG_SOC_COMPATIBLE_NRF54LX)
+
+#if IS_ENABLED(CONFIG_MPSL_LOW_LATENCY_CALLBACKS)
+#if IS_ENABLED(CONFIG_NRFX_POWER)
 #include <nrfx_power.h>
-#endif
-#if IS_ENABLED(CONFIG_SOC_SERIES_NRF54L)
+#else
+#include <hal/nrf_power.h>
+#endif /* CONFIG_NRFX_POWER */
+
+#if IS_ENABLED(CONFIG_NRF_SYS_EVENT)
 #include <nrf_sys_event.h>
-#endif
+#endif /* CONFIG_NRF_SYS_EVENT */
+#endif /* IS_ENABLED(CONFIG_MPSL_LOW_LATENCY_CALLBACKS) */
+
+/* Include SoC-specific parameters for MPSL init.
+ * Keep this include as is to do not break the overload functionality.
+ */
+#include <mpsl_init_soc.h>
 
 #if defined(CONFIG_SOC_SERIES_NRF54H)
 #include <hal/nrf_dppi.h>
@@ -41,6 +54,10 @@
 #if IS_ENABLED(CONFIG_MPSL_USE_EXTERNAL_CLOCK_CONTROL)
 #include "../clock_ctrl/mpsl_clock_ctrl.h"
 #endif /* CONFIG_MPSL_USE_EXTERNAL_CLOCK_CONTROL */
+
+#if !defined(CONFIG_CLOCK_CONTROL_NRF)
+#define CLOCK_NODE_LFCLK DT_COMPAT_GET_ANY_STATUS_OKAY(nordic_nrf_clock_lfclk)
+#endif /* !defined(CONFIG_CLOCK_CONTROL_NRF) */
 
 LOG_MODULE_REGISTER(mpsl_init, CONFIG_MPSL_LOG_LEVEL);
 
@@ -59,47 +76,20 @@ extern void rtc_pretick_rtc0_isr_hook(void);
 #endif
 
 #if IS_ENABLED(CONFIG_COUNTER)
-#if IS_ENABLED(CONFIG_SOC_COMPATIBLE_NRF52X) || IS_ENABLED(CONFIG_SOC_NRF5340_CPUNET)
-BUILD_ASSERT(!DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(rtc0)),
-	     "MPSL reserves RTC0 on this SoC.");
-BUILD_ASSERT(!DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(timer0)),
-	     "MPSL reserves TIMER0 on this SoC.");
-#elif IS_ENABLED(CONFIG_SOC_COMPATIBLE_NRF54LX) || IS_ENABLED(CONFIG_SOC_SERIES_NRF71)
-BUILD_ASSERT(!DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(timer10)),
-	     "MPSL reserves TIMER10 on this SoC.");
-#elif IS_ENABLED(CONFIG_SOC_SERIES_NRF54H)
-BUILD_ASSERT(!DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(timer020)),
-	     "MPSL reserves TIMER020 on this SoC.");
+/* Macros used below are declared in mpsl_init_soc.h */
+#if defined(MPSL_INIT_SOC_COUNTER_RESERVED_NODES)
+#define MPSL_BUILD_ASSERT_COUNTER_NODE_NOT_OKAY(node)                                              \
+	BUILD_ASSERT(!DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(node)),                                 \
+		     "MPSL reserves " #node " on this SoC. Please disable this node in device tree")
+FOR_EACH(MPSL_BUILD_ASSERT_COUNTER_NODE_NOT_OKAY, (;),
+	 MPSL_INIT_SOC_COUNTER_RESERVED_NODES);
+#undef MPSL_BUILD_ASSERT_COUNTER_NODE_NOT_OKAY
 #else
-#error
+#error "Counter DTS nodes reserved for MPSL are missing"
 #endif
 #endif /* IS_ENABLED(CONFIG_COUNTER) */
 
-#if defined(CONFIG_SOC_COMPATIBLE_NRF52X) || defined(CONFIG_SOC_COMPATIBLE_NRF53X)
-#define MPSL_TIMER_IRQn TIMER0_IRQn
-#define MPSL_RTC_IRQn RTC0_IRQn
-#define MPSL_RADIO_IRQn RADIO_IRQn
-#elif defined(CONFIG_SOC_COMPATIBLE_NRF54LX) || defined(CONFIG_SOC_SERIES_NRF71)
-#define MPSL_TIMER_IRQn TIMER10_IRQn
-#define MPSL_RTC_IRQn GRTC_3_IRQn
-#define MPSL_RADIO_IRQn RADIO_0_IRQn
-#elif defined(CONFIG_SOC_SERIES_NRF54H)
-#define MPSL_TIMER_IRQn TIMER020_IRQn
-#define MPSL_RTC_IRQn GRTC_2_IRQn
-#define MPSL_RADIO_IRQn RADIO_0_IRQn
-#endif
-
-#if defined(CONFIG_SOC_SERIES_NRF54H)
-/* Basic build time sanity checking */
-#define MPSL_RESERVED_GRTC_CHANNELS ((1U << 8) | (1U << 9) | (1U << 10) | (1U << 11) | (1U << 12))
-#elif defined(CONFIG_SOC_COMPATIBLE_NRF54LX) || defined(CONFIG_SOC_SERIES_NRF71)
-#define MPSL_RESERVED_GRTC_CHANNELS ((1U << 7) | (1U << 8) | (1U << 9) | (1U << 10) | (1U << 11))
-#endif
-
-#if defined(CONFIG_SOC_SERIES_NRF54H) || \
-	defined(CONFIG_SOC_COMPATIBLE_NRF54LX) || \
-	defined(CONFIG_SOC_SERIES_NRF71)
-
+#if IS_ENABLED(CONFIG_NRFX_GRTC)
 BUILD_ASSERT(MPSL_RTC_IRQn != DT_IRQN(DT_NODELABEL(grtc)), "MPSL requires a dedicated GRTC IRQ");
 
 #define CHECK_IRQ(val, _) (DT_IRQ_BY_IDX(DT_NODELABEL(grtc), val, irq) == MPSL_RTC_IRQn)
@@ -114,12 +104,9 @@ BUILD_ASSERT(MPSL_IRQ_IN_DT, "The MPSL GRTC IRQ is not in the device tree");
 BUILD_ASSERT((NRFX_CONFIG_MASK_DT(DT_NODELABEL(grtc), child_owned_channels) &
 	      MPSL_RESERVED_GRTC_CHANNELS) == MPSL_RESERVED_GRTC_CHANNELS,
 	     "The GRTC channels used by MPSL must not be used by zephyr");
-#endif
+#endif /* IS_ENABLED(CONFIG_NRFX_GRTC) */
 
-#if defined(CONFIG_SOC_SERIES_NRF54H)
-#define MPSL_RESERVED_IPCT_SOURCE_CHANNELS (1U << 0)
-#define MPSL_RESERVED_DPPI_SOURCE_CHANNELS (1U << 0)
-#define MPSL_RESERVED_DPPI_SINK_CHANNELS (1U << 0)
+#if IS_ENABLED(CONFIG_SOC_SERIES_NRF54H) /* IPCT is relevant for nRF54H only */
 /* check the GRTC source channels.
  * i.e. ensure something similar to this is present in the DT
  * &dppic132 {
@@ -171,11 +158,11 @@ BUILD_ASSERT((IPCT_SOURCE_CHANNELS & MPSL_RESERVED_IPCT_SOURCE_CHANNELS) ==
 		     MPSL_RESERVED_IPCT_SOURCE_CHANNELS,
 	     "The required IPCT source channels are not reserved");
 
-#endif
+#endif /* CONFIG_SOC_SERIES_NRF54H */
 
-#if defined(CONFIG_SOC_SERIES_NRF54L)
-BUILD_ASSERT(NRF_CONFIG_CPU_FREQ_MHZ == 128, "Currently mpsl only works when frequency is 128MHz");
-#endif
+#ifdef MPSL_INIT_SOC_CPU_FREQ_MHZ
+BUILD_ASSERT(NRF_CONFIG_CPU_FREQ_MHZ == MPSL_INIT_SOC_CPU_FREQ_MHZ, "Unsupported CPU frequency");
+#endif /* MPSL_INIT_SOC_CPU_FREQ_MHZ */
 
 #if IS_ENABLED(CONFIG_NRF_GRTC_TIMER) && !defined(CONFIG_SOC_SERIES_NRF54H)
 BUILD_ASSERT(IS_ENABLED(CONFIG_NRF_GRTC_TIMER_AUTO_KEEP_ALIVE),
@@ -194,13 +181,26 @@ static struct k_work mpsl_low_prio_work;
 struct k_work_q mpsl_work_q;
 static K_THREAD_STACK_DEFINE(mpsl_work_stack, CONFIG_MPSL_WORK_STACK_SIZE);
 
-#if IS_ENABLED(CONFIG_SOC_SERIES_NRF54L) && !IS_ENABLED(CONFIG_TRUSTED_EXECUTION_NONSECURE)
+#if IS_ENABLED(CONFIG_MPSL_LOW_LATENCY_CALLBACKS) && !IS_ENABLED(CONFIG_TRUSTED_EXECUTION_NONSECURE)
+/* Check existence of rram_controller node in the device tree to figure out whether RRAMC is
+ * supported.
+ *
+ * Note: The standard CONFIG_HAS_HW_NRF_RRAMC expects the DTS node to be set (okay).
+ *       The CONFIG_NRFX_RRAMC informs if the node is in DTS but it is not selected by default
+ *       so it is not defined for preprocessor.
+ */
+#if DT_NODE_EXISTS(DT_NODELABEL(rram_controller))
+#define MPSL_HW_HAS_RRAMC 1
+
 #if IS_ENABLED(CONFIG_NRF_SYS_EVENT_IRQ_LATENCY)
 static int m_nvm_low_latency_event_handle = -1;
 #else
 static uint32_t m_rram_lowpower_config;
 #endif /* IS_ENABLED(CONFIG_NRF_SYS_EVENT_IRQ_LATENCY) */
-#endif /* IS_ENABLED(CONFIG_SOC_SERIES_NRF54L) && !IS_ENABLED(CONFIG_TRUSTED_EXECUTION_NONSECURE) */
+#endif /* DT_NODE_EXISTS(DT_NODELABEL(rram_controller)) */
+#endif /* IS_ENABLED(CONFIG_MPSL_LOW_LATENCY_CALLBACKS) &&
+	* !IS_ENABLED(CONFIG_TRUSTED_EXECUTION_NONSECURE)
+	*/
 
 #define MPSL_TIMESLOT_SESSION_COUNT (\
 	CONFIG_MPSL_TIMESLOT_SESSION_COUNT + \
@@ -322,6 +322,23 @@ void m_assert_handler(const char *const file, const uint32_t line)
 }
 
 #else /* !IS_ENABLED(CONFIG_MPSL_ASSERT_HANDLER) */
+
+#if defined(CONFIG_LOG)
+const char *mpsl_get_assertion_message(const char *const file, const uint32_t line)
+{
+	uint32_t file_id = atoi(file);
+
+	for (uint32_t i = 0; i < ARRAY_SIZE(mpsl_assert_messages); i++) {
+		if (mpsl_assert_messages[i].file_id == file_id &&
+		    mpsl_assert_messages[i].line == line) {
+			return mpsl_assert_messages[i].assert_msg;
+		}
+	}
+
+	return NULL;
+}
+#endif /* CONFIG_LOG */
+
 static void m_assert_handler(const char *const file, const uint32_t line)
 {
 	volatile char assert_file_id[11] = { 0 };
@@ -330,12 +347,17 @@ static void m_assert_handler(const char *const file, const uint32_t line)
 	strncpy((char *)assert_file_id, file, sizeof(assert_file_id) - 1);
 
 #if defined(CONFIG_ASSERT) && defined(CONFIG_ASSERT_VERBOSE) && !defined(CONFIG_ASSERT_NO_MSG_INFO)
-	__ASSERT(false, "MPSL ASSERT: %s, %d\n", (char *)assert_file_id, assert_line);
+	__ASSERT(false, "MPSL ASSERT: %s, 0x%04x\n", (char *)assert_file_id, assert_line);
 #elif defined(CONFIG_LOG)
-	LOG_ERR("MPSL ASSERT: %s, %d", (char *)assert_file_id, assert_line);
+	LOG_ERR("MPSL ASSERT: %s, 0x%04x", (char *)assert_file_id, assert_line);
+	const char *failure_reason_msg =
+		mpsl_get_assertion_message(file, line);
+	if (failure_reason_msg) {
+		LOG_ERR("ASSERT REASON: %s", failure_reason_msg);
+	}
 	k_oops();
 #elif defined(CONFIG_PRINTK)
-	printk("MPSL ASSERT: %s, %d\n", (char *)assert_file_id, assert_line);
+	printk("MPSL ASSERT: %s, 0x%04x\n", (char *)assert_file_id, assert_line);
 	printk("\n");
 	k_oops();
 #else
@@ -346,6 +368,7 @@ static void m_assert_handler(const char *const file, const uint32_t line)
 #endif /* IS_ENABLED(CONFIG_MPSL_ASSERT_HANDLER) */
 
 #if !defined(CONFIG_MPSL_USE_EXTERNAL_CLOCK_CONTROL)
+#if defined(CONFIG_CLOCK_CONTROL_NRF)
 static uint8_t m_config_clock_source_get(void)
 {
 #ifdef CONFIG_CLOCK_CONTROL_NRF_K32SRC_RC
@@ -363,6 +386,25 @@ static uint8_t m_config_clock_source_get(void)
 	return 0;
 #endif
 }
+#else
+static uint8_t m_config_clock_source_get(void)
+{
+#if DT_ENUM_HAS_VALUE(CLOCK_NODE_LFCLK, k32src, rc)
+	return MPSL_CLOCK_LF_SRC_RC;
+#elif DT_ENUM_HAS_VALUE(CLOCK_NODE_LFCLK, k32src, xtal)
+	return MPSL_CLOCK_LF_SRC_XTAL;
+#elif DT_ENUM_HAS_VALUE(CLOCK_NODE_LFCLK, k32src, synth)
+	return MPSL_CLOCK_LF_SRC_SYNTH;
+#elif DT_ENUM_HAS_VALUE(CLOCK_NODE_LFCLK, k32src, ext_low_swing)
+	return MPSL_CLOCK_LF_SRC_EXT_LOW_SWING;
+#elif DT_ENUM_HAS_VALUE(CLOCK_NODE_LFCLK, k32src, ext_full_swing)
+	return MPSL_CLOCK_LF_SRC_EXT_FULL_SWING;
+#else
+	#error "Clock source is not supported or not defined"
+	return 0;
+#endif
+}
+#endif /* CONFIG_CLOCK_CONTROL_NRF */
 #endif /* !CONFIG_MPSL_USE_EXTERNAL_CLOCK_CONTROL */
 
 #if defined(CONFIG_MPSL_CALIBRATION_PERIOD)
@@ -401,25 +443,36 @@ static int32_t mpsl_lib_init_internal(void)
 	/* TODO: Clock config should be adapted in the future to new architecture. */
 #if !defined(CONFIG_MPSL_USE_EXTERNAL_CLOCK_CONTROL)
 	clock_cfg.source = m_config_clock_source_get();
+#if defined(CONFIG_CLOCK_CONTROL_NRF)
 	clock_cfg.accuracy_ppm = CONFIG_CLOCK_CONTROL_NRF_ACCURACY;
+#else
+	clock_cfg.accuracy_ppm = DT_PROP(CLOCK_NODE_LFCLK, k32src_accuracy_ppm);
+#endif /* CONFIG_CLOCK_CONTROL_NRF */
 	clock_cfg.skip_wait_lfclk_started =
 		IS_ENABLED(CONFIG_SYSTEM_CLOCK_NO_WAIT);
 
-#ifdef CONFIG_CLOCK_CONTROL_NRF_K32SRC_RC
+#if defined(CONFIG_CLOCK_CONTROL_NRF_K32SRC_RC) || \
+	(!defined(CONFIG_CLOCK_CONTROL_NRF) && DT_ENUM_HAS_VALUE(CLOCK_NODE_LFCLK, k32src, rc))
+#if defined(CONFIG_CLOCK_CONTROL_NRF_K32SRC_RC)
 	BUILD_ASSERT(IS_ENABLED(CONFIG_CLOCK_CONTROL_NRF_K32SRC_RC_CALIBRATION),
 		    "MPSL requires clock calibration to be enabled when RC is used as LFCLK");
+#endif
 
 	/* clock_cfg.rc_ctiv is given in 1/4 seconds units.
 	 * CONFIG_MPSL_CALIBRATION_PERIOD is given in ms.
 	 */
 	clock_cfg.rc_ctiv = (CONFIG_MPSL_CALIBRATION_PERIOD * 4 / 1000);
+#if IS_ENABLED(CONFIG_CLOCK_CONTROL_NRF_K32SRC_RC_CALIBRATION)
 	clock_cfg.rc_temp_ctiv = CONFIG_CLOCK_CONTROL_NRF_CALIBRATION_MAX_SKIP + 1;
 	BUILD_ASSERT(CONFIG_CLOCK_CONTROL_NRF_CALIBRATION_TEMP_DIFF == 2,
 		     "MPSL always uses a temperature diff threshold of 0.5 degrees");
 #else
+	clock_cfg.rc_temp_ctiv = MPSL_RECOMMENDED_RC_TEMP_CTIV;
+#endif
+#else
 	clock_cfg.rc_ctiv = 0;
 	clock_cfg.rc_temp_ctiv = 0;
-#endif /* CONFIG_CLOCK_CONTROL_NRF_K32SRC_RC */
+#endif /* RC LFCLK source */
 #endif /* !CONFIG_MPSL_USE_EXTERNAL_CLOCK_CONTROL */
 
 #if defined(CONFIG_MPSL_USE_EXTERNAL_CLOCK_CONTROL)
@@ -467,8 +520,7 @@ static int32_t mpsl_lib_init_internal(void)
 		return err;
 	}
 #endif /* MPSL_TIMESLOT_SESSION_COUNT > 0 */
-#if defined(NRF_TRUSTZONE_NONSECURE) && \
-	defined(CONFIG_MPSL_FORCE_RRAM_ON_ALL_THE_TIME)
+#if defined(CONFIG_MPSL_FORCE_RRAM_ON_ALL_THE_TIME)
 	uint32_t result_out;
 	uint32_t result = tfm_platform_mem_write32((uint32_t)&NRF_RRAMC_S->POWER.LOWPOWERCONFIG,
 		RRAMC_POWER_LOWPOWERCONFIG_MODE_Standby << RRAMC_POWER_LOWPOWERCONFIG_MODE_Pos,
@@ -523,7 +575,7 @@ static int mpsl_low_prio_init(void)
 	k_work_queue_start(&mpsl_work_q, mpsl_work_stack,
 			   K_THREAD_STACK_SIZEOF(mpsl_work_stack),
 			   K_PRIO_COOP(CONFIG_MPSL_THREAD_COOP_PRIO), NULL);
-	k_thread_name_set(&mpsl_work_q.thread, "MPSL Work");
+	k_thread_name_set(mpsl_work_q.thread_id, "MPSL Work");
 	k_work_init(&mpsl_low_prio_work, mpsl_low_prio_work_handler);
 
 	IRQ_CONNECT(CONFIG_MPSL_LOW_PRIO_IRQN, MPSL_LOW_PRIO,
@@ -597,10 +649,13 @@ int32_t mpsl_lib_uninit(void)
 #endif /* IS_ENABLED(CONFIG_MPSL_DYNAMIC_INTERRUPTS) */
 }
 
-#if defined(CONFIG_SOC_COMPATIBLE_NRF54LX)
+#if defined(CONFIG_MPSL_LOW_LATENCY_CALLBACKS)
 void mpsl_low_latency_acquire_callback(void)
 {
-#if IS_ENABLED(CONFIG_SOC_SERIES_NRF54L)
+/* We need to know whether RRAMC is supported on the platform. The IS_ENABLED() returns true if the
+ * KConfig is set. In this case it is enough to check whether there is
+ */
+#if defined(MPSL_HW_HAS_RRAMC)
 #if IS_ENABLED(CONFIG_NRF_SYS_EVENT)
 	int err;
 
@@ -609,10 +664,10 @@ void mpsl_low_latency_acquire_callback(void)
 		LOG_ERR("NVM low latency request has failed (%d)", err);
 	}
 #elif IS_ENABLED(CONFIG_NRFX_POWER)
-	nrfx_power_constlat_mode_request();
+	(void)nrfx_power_constlat_mode_request();
 #else
 	nrf_power_task_trigger(NRF_POWER, NRF_POWER_TASK_CONSTLAT);
-#endif /* IS_ENABLED(CONFIG_NRF_SYS_EVENT) */
+#endif /* NRF_POWER_HAS_CONST_LATENCY && NRF_POWER_HAS_LOW_POWER */
 
 #if !IS_ENABLED(CONFIG_TRUSTED_EXECUTION_NONSECURE)
 #if IS_ENABLED(CONFIG_NRF_SYS_EVENT_IRQ_LATENCY)
@@ -626,16 +681,21 @@ void mpsl_low_latency_acquire_callback(void)
 	m_nvm_low_latency_event_handle = event_handle;
 #else
 	m_rram_lowpower_config = NRF_RRAMC->POWER.LOWPOWERCONFIG;
+#if IS_ENABLED(CONFIG_MPSL_RRAM_LOW_LATENCY_MODE_IDLE)
+	NRF_RRAMC->POWER.LOWPOWERCONFIG = RRAMC_POWER_LOWPOWERCONFIG_MODE_Idle
+					  << RRAMC_POWER_LOWPOWERCONFIG_MODE_Pos;
+#else
 	NRF_RRAMC->POWER.LOWPOWERCONFIG = RRAMC_POWER_LOWPOWERCONFIG_MODE_Standby
 					  << RRAMC_POWER_LOWPOWERCONFIG_MODE_Pos;
+#endif /* IS_ENABLED(CONFIG_MPSL_RRAM_LOW_LATENCY_MODE_IDLE) */
 #endif /* IS_ENABLED(CONFIG_NRF_SYS_EVENT_IRQ_LATENCY) */
 #endif /* !IS_ENABLED(CONFIG_TRUSTED_EXECUTION_NONSECURE) */
-#endif /* IS_ENABLED(CONFIG_SOC_SERIES_NRF54L) */
+#endif /* defined(MPSL_HW_HAS_RRAMC) */
 }
 
 void mpsl_low_latency_release_callback(void)
 {
-#if IS_ENABLED(CONFIG_SOC_SERIES_NRF54L)
+#if defined(MPSL_HW_HAS_RRAMC)
 #if IS_ENABLED(CONFIG_NRF_SYS_EVENT)
 	int ret;
 
@@ -644,7 +704,7 @@ void mpsl_low_latency_release_callback(void)
 		LOG_ERR("NVM low latency release has failed (%d)", ret);
 	}
 #elif IS_ENABLED(CONFIG_NRFX_POWER)
-	nrfx_power_constlat_mode_free();
+	(void)nrfx_power_constlat_mode_free();
 #else
 	nrf_power_task_trigger(NRF_POWER, NRF_POWER_TASK_LOWPWR);
 #endif /* IS_ENABLED(CONFIG_NRF_SYS_EVENT) */
@@ -661,9 +721,9 @@ void mpsl_low_latency_release_callback(void)
 	NRF_RRAMC->POWER.LOWPOWERCONFIG = m_rram_lowpower_config;
 #endif /* IS_ENABLED(CONFIG_NRF_SYS_EVENT_IRQ_LATENCY) */
 #endif /* !IS_ENABLED(CONFIG_TRUSTED_EXECUTION_NONSECURE) */
-#endif /* IS_ENABLED(CONFIG_SOC_SERIES_NRF54L) */
+#endif /* defined(MPSL_HW_HAS_RRAMC) */
 }
-#endif /* defined(CONFIG_SOC_COMPATIBLE_NRF54LX) */
+#endif /* defined(CONFIG_MPSL_LOW_LATENCY_CALLBACKS) */
 
 #if defined(CONFIG_MPSL_USE_EXTERNAL_CLOCK_CONTROL)
 #define MPSL_INIT_LEVEL POST_KERNEL
